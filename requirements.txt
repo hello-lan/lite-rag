@@ -1,0 +1,12 @@
+# sqlite3 是 Python 标准库，不用安装。
+# BGE-M3 由 sentence-transformers 按 config.yaml 里的模型名下载，没有单独的 bge-m3 包。
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+langchain-text-splitters>=0.2.0
+pypdf>=4.0.0
+marko>=2.0.0
+pyyaml>=6.0
+rank-bm25>=0.2.2
+jieba>=0.42.1
+numpy>=1.26.0
+click>=8.1.0

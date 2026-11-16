@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.python-version
+chroma_db/
+models/
+meta.db
+bm25_index.pkl
+.env
+*.egg-info/
+.idea/
+.vscode/
+.DS_Store
+docs/
+*.pdf

@@ -1,0 +1,59 @@
+# 财报 RAG 本地配置。改切分或 embedding 后，用对应脚本重跑，不必改代码。
+
+split:
+  version: "v1"
+  chunk_size: 1000
+  chunk_overlap: 200
+  # 中文财报按句号、分号再切开，避免把一整段指标切碎
+  separators:
+    - "\n\n"
+    - "\n"
+    - "。"
+    - "；"
+    - "，"
+    - " "
+    - ""
+
+embedding:
+  version: "bge-m3-v1"
+  # 相对项目根目录的本地模型。也可以写成 Hub 名，例如 BAAI/bge-m3
+  model_name: "models/bge-m3"
+  # 显存或内存紧张、只想先跑通流程时，可改成 BAAI/bge-small-zh-v1.5
+  batch_size: 8
+  # 与 chunk_size 对齐。BGE-M3 最长可到 8192，CPU 上会明显变慢
+  max_seq_length: 1024
+  normalize: true
+  # BGE-M3 稠密检索不需要查询指令前缀
+  query_instruction: ""
+  device: "auto" # auto | cpu | cuda
+
+retrieval:
+  # hybrid：BM25 + 向量，RRF 融合（默认）
+  # bm25：只走关键词，适合年份、科目、指标名
+  # vector：只走语义，适合风险、竞争力这类问法
+  mode: hybrid
+  top_k: 4
+  # 混合模式下每一路先多召回一些，融合后再截到 top_k
+  candidate_k: 10
+  rrf_k: 60
+
+paths:
+  docs_dir: docs
+  chroma_dir: chroma_db
+  meta_db: meta.db
+  bm25_index: bm25_index.pkl
+  collection_name: finance_chunks
+
+llm:
+  # 默认只返回命中的原文。设为 true，或查询时加 --answer，才会请求大模型
+  enabled: true
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  model: "deepseek-flash"
+  temperature: 0.1
+  timeout: 120
+  system_prompt: |
+    你是财报问答助手。只根据用户给出的材料回答。
+    不要编造材料里没有的数字、日期、比例和事件。
+    材料不够时，直接说明缺什么。
+    回答时用【来源：文件名】注明依据。
