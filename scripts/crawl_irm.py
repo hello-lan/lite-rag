@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="爬取深交所互动易上的上市公司问答")
     add_crawl_arguments(
         parser,
-        default_output=ROOT / "docs" / "irm",
-        output_help="输出目录，默认 docs/irm",
+        default_output=ROOT / "docs" / "raw" / "irm",
+        output_help="输出目录，默认 docs/raw/irm",
         page_size=100,
         page_size_help="每页条数，默认 100",
         max_pages_help="每家公司最多翻多少页，0 表示翻完",

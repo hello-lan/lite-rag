@@ -63,8 +63,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="爬取上证 e 互动上的上市公司问答")
     add_crawl_arguments(
         parser,
-        default_output=ROOT / "docs" / "sse",
-        output_help="输出目录，默认 docs/sse",
+        default_output=ROOT / "docs" / "raw" / "sse",
+        output_help="输出目录，默认 docs/raw/sse",
         page_size=10,
         page_size_help="每页条数，站点默认 10",
         max_pages_help="每种列表最多翻多少页，0 表示翻完",

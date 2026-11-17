@@ -38,7 +38,9 @@ retrieval:
   rrf_k: 60
 
 paths:
-  docs_dir: docs
+  # PDF、Markdown 放在 docs/raw，已切分的 JSON 放在 docs/split
+  docs_dir: docs/raw
+  split_dir: docs/split
   # 入库生成的 sqlite、BM25 和 Chroma 都放在 data/
   chroma_dir: data/chroma
   meta_db: data/meta.db
@@ -54,7 +56,8 @@ llm:
   temperature: 0.1
   timeout: 120
   system_prompt: |
-    你是财报问答助手。只根据用户给出的材料回答。
+    你是投资研究助手。只根据用户给出的材料回答。
     不要编造材料里没有的数字、日期、比例和事件。
     材料不够时，直接说明缺什么。
-    回答时用【来源：文件名】注明依据。
+    公司事实和投资通识分开写，不要把一家公司的内容安到另一家公司上。
+    回答时用【来源：类型、公司、报告期或标题】注明依据。

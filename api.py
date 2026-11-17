@@ -20,6 +20,8 @@ from lite_rag.config import configure_stdio, load_config
 from lite_rag.search import retrieve
 
 Mode = Literal["hybrid", "bm25", "vector"]
+Scope = Literal["company", "knowledge"]
+DocType = Literal["filing", "ir_qa", "survey", "research", "news", "theory", "beginner"]
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -38,13 +40,33 @@ class QueryRequest(BaseModel):
     mode: Mode | None = Field(default=None, description="检索模式。不传则使用 retrieval.mode")
     top_k: StrictInt | None = Field(default=None, ge=1, description="返回的 chunk 数。不传则使用 retrieval.top_k")
     answer: StrictBool | None = Field(default=None, description="是否调用大模型。不传则跟随 llm.enabled")
+    scope: Scope | None = Field(default=None, description="company 只查公司材料，knowledge 只查投资通识")
+    doc_type: DocType | None = Field(
+        default=None,
+        description="filing 定期报告，ir_qa 互动问答，survey 调研，research 研报，news 新闻，theory 投资理论，beginner 入门答疑",
+    )
+    company: str | None = Field(default=None, description="公司简称，精确匹配")
+    stock_code: str | None = Field(default=None, description="6 位股票代码")
+    year: StrictInt | None = Field(default=None, ge=1900, le=2100, description="报告期或发布年份")
 
-    @field_validator("question")
+    @field_validator("question", "company")
     @classmethod
-    def question_not_blank(cls, value: str) -> str:
+    def text_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         text = value.strip()
         if not text:
             raise ValueError("不能为空")
+        return text
+
+    @field_validator("stock_code")
+    @classmethod
+    def code_is_six_digits(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if len(text) != 6 or not text.isdigit():
+            raise ValueError("需要是 6 位数字")
         return text
 
 
@@ -57,6 +79,15 @@ class Hit(BaseModel):
     chunk_text: str
     score: float | None
     score_name: str
+    scope: str
+    doc_type: str
+    title: str
+    company: str
+    stock_code: str
+    year: int
+    period: str
+    published_on: str
+    publisher: str
 
 
 class QueryResponse(BaseModel):
@@ -97,7 +128,15 @@ def create_app(config_path: str | None = None) -> FastAPI:
         want_answer = body.answer if body.answer is not None else bool(cfg["llm"].get("enabled"))
         with query_lock:
             try:
-                hits = retrieve(cfg, body.question)
+                hits = retrieve(
+                    cfg,
+                    body.question,
+                    scope=body.scope,
+                    doc_type=body.doc_type,
+                    company=body.company,
+                    stock_code=body.stock_code,
+                    year=body.year,
+                )
             except SystemExit as exc:
                 raise HTTPException(status_code=400, detail=_exit_message(exc)) from exc
 

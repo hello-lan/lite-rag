@@ -7,12 +7,14 @@ import os
 import urllib.error
 import urllib.request
 
+from lite_rag.meta import source_label
+
 
 def build_context(hits: list[dict]) -> str:
     blocks = []
     for hit in hits:
         blocks.append(
-            f"[{hit['rank']}] 来源：{hit['source_name']}（chunk #{hit['chunk_idx']}）\n{hit['chunk_text']}"
+            f"[{hit['rank']}] 来源：{source_label(hit)}（chunk #{hit['chunk_idx']}）\n{hit['chunk_text']}"
         )
     return "\n\n".join(blocks)
 
