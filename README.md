@@ -20,7 +20,7 @@ models/bge-m3/               本地 BGE-M3 模型
 data/                        入库生成的索引：meta.db、bm25_index.pkl、chroma/
 config.yaml                  切分、模型、召回条数、大模型
 main.py                      命令行入口：ingest、ingest-split、query、reembed、serve
-api.py                       查询接口：POST /query
+api.py                       查询接口：POST /retrieve、POST /query
 lite_rag/                    解析、索引、检索、回答
 scripts/                     上证 e 互动、深交所互动易采集
 ```
@@ -165,21 +165,21 @@ python main.py query 2025年毛利率是多少 --answer
 
 ```powershell
 python api.py
-python api.py --host 127.0.0.1 --port 8000
+python api.py --host 127.0.0.1 --port 8100
 python main.py serve
-python main.py serve --host 127.0.0.1 --port 8000
+python main.py serve --host 127.0.0.1 --port 8100
 ```
 
 `python api.py` 和 `python main.py serve` 启动的是同一个查询接口。
 
-默认只监听本机的 `8000` 端口。接口用 FastAPI，请求体由模型校验：`question` 必填且不能为空白，`mode` 只能是 `hybrid`、`bm25` 或 `vector`，`top_k` 必须是大于 0 的整数，`answer` 必须是布尔值。可选筛选是 `scope`（`company` 或 `knowledge`）、`doc_type`、`company`、`stock_code` 和 `year`。`mode`、`top_k`、`answer` 不传时分别使用 `retrieval.mode`、`retrieval.top_k` 和 `llm.enabled`。字段不合法时返回 422，字段说明见 `http://127.0.0.1:8000/docs`。
+默认只监听本机的 `8100` 端口。`POST /retrieve` 只返回命中，不调用大模型。`POST /query` 仍可按 `answer` 或 `llm.enabled` 生成回答。接口用 FastAPI，请求体由模型校验：`question` 必填且不能为空白，`mode` 只能是 `hybrid`、`bm25` 或 `vector`，`top_k` 必须是大于 0 的整数，`answer` 必须是布尔值。可选筛选是 `scope`（`company` 或 `knowledge`）、`doc_type`、`company`、`stock_code` 和 `year`。`mode`、`top_k`、`answer` 不传时分别使用 `retrieval.mode`、`retrieval.top_k` 和 `llm.enabled`。字段不合法时返回 422，字段说明见 `http://127.0.0.1:8100/docs`。`GET /health` 返回服务是否在运行，以及索引文件是否存在。
 
 ```powershell
-$body = @{ question = "2025年毛利率是多少"; stock_code = "600519"; doc_type = "filing"; answer = $false } | ConvertTo-Json -Compress
-Invoke-RestMethod http://127.0.0.1:8000/query -Method Post -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
+$body = @{ question = "2025年毛利率是多少"; stock_code = "600519"; doc_type = "filing" } | ConvertTo-Json -Compress
+Invoke-RestMethod http://127.0.0.1:8100/retrieve -Method Post -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-返回 `mode`、`hits` 和可选的 `answer`。每条命中带有 `scope`、`doc_type`、`company`、`stock_code`、`year`、`period`、`published_on`、`publisher`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
+`POST /retrieve` 返回 `mode` 和 `hits`。`POST /query` 还可以带上 `answer`。每条命中带有 `scope`、`doc_type`、`company`、`stock_code`、`year`、`period`、`published_on`、`publisher`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
 
 ## 更换 embedding
 

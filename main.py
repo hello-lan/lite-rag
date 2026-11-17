@@ -67,7 +67,12 @@ def ingest_split(config_path: str | None, force: bool, check: bool) -> None:
 @_config_option
 @click.option("--mode", type=click.Choice(["hybrid", "bm25", "vector"]), help="覆盖 config.yaml 里的检索模式")
 @click.option("--top-k", type=click.IntRange(min=1), help="最终返回的 chunk 数")
-@click.option("--answer", is_flag=True, help="用配置里的大模型根据命中材料生成回答")
+@click.option(
+    "--output",
+    type=click.Choice(["hits", "answer", "both"]),
+    help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印",
+)
+@click.option("--answer", is_flag=True, help="用配置里的大模型根据命中材料生成回答，并和检索结果一起打印")
 @click.option("--no-answer", is_flag=True, help="即使配置开启了大模型，也只打印命中原文")
 @click.option("--scope", type=click.Choice(list(SCOPES)), help="只查公司材料 company，或投资通识 knowledge")
 @click.option("--doc-type", type=click.Choice(list(DOC_TYPES)), help="材料类型：filing、ir_qa、survey、research、news、theory、beginner")
@@ -79,6 +84,7 @@ def query(
     config_path: str | None,
     mode: str | None,
     top_k: int | None,
+    output: str | None,
     answer: bool,
     no_answer: bool,
     scope: str | None,
@@ -89,6 +95,10 @@ def query(
 ) -> None:
     if answer and no_answer:
         raise click.UsageError("--answer 和 --no-answer 不能同时使用")
+    if output == "hits" and answer:
+        raise click.UsageError("--output hits 不能和 --answer 一起用")
+    if output in ("answer", "both") and no_answer:
+        raise click.UsageError(f"--output {output} 不能和 --no-answer 一起用")
     cfg = load_config(config_path)
     if mode:
         cfg["retrieval"]["mode"] = mode
@@ -114,12 +124,12 @@ def query(
         stock_code=filt.stock_code or None,
         year=filt.year or None,
     )
-    print_hits(cfg["retrieval"]["mode"], hits, filt)
-
-    want_answer = answer or (cfg["llm"].get("enabled") and not no_answer)
-    if no_answer:
-        want_answer = False
-    if want_answer:
+    if output is None:
+        want_answer = answer or (bool(cfg["llm"].get("enabled")) and not no_answer)
+        output = "both" if want_answer else "hits"
+    if output in ("hits", "both"):
+        print_hits(cfg["retrieval"]["mode"], hits, filt)
+    if output in ("answer", "both"):
         print("回答:")
         print(generate_answer(cfg, text, hits))
 
@@ -127,7 +137,7 @@ def query(
 @cli.command(help="启动查询接口，和 python api.py 是同一个服务。")
 @_config_option
 @click.option("--host", default="127.0.0.1", show_default=True, help="监听地址，默认只接受本机访问")
-@click.option("--port", type=click.IntRange(min=1, max=65535), default=8000, show_default=True, help="监听端口")
+@click.option("--port", type=click.IntRange(min=1, max=65535), default=8100, show_default=True, help="监听端口")
 def serve(config_path: str | None, host: str, port: int) -> None:
     from api import serve as run_api
 

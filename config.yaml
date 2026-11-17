@@ -48,8 +48,9 @@ paths:
   collection_name: finance_chunks
 
 llm:
-  # 默认只返回命中的原文。设为 true，或查询时加 --answer，才会请求大模型
-  enabled: true
+  # HTTP 默认只返回命中原文。设为 true 后，POST /query 不传 answer 时会调用大模型。
+  # 命令行 --answer 仍可根据命中材料生成回答。
+  enabled: false
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   model: "deepseek-flash"
