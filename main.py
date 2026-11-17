@@ -1,4 +1,4 @@
-"""财报 RAG 命令行：入库、查询、按当前模型重算向量。"""
+"""财报 RAG 命令行：入库、查询、按当前模型重算向量、启动查询接口。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from lite_rag.ingest import ingest_documents, reembed_vectors
 from lite_rag.search import retrieve
 
 
-@click.group(help="本地财报 RAG：入库、查询、按新模型重算向量。")
+@click.group(help="本地财报 RAG：入库、查询、按新模型重算向量、启动查询接口。")
 def cli() -> None:
     configure_stdio()
 
@@ -81,6 +81,16 @@ def query(
     if want_answer:
         print("回答:")
         print(generate_answer(cfg, text, hits))
+
+
+@cli.command(help="启动查询接口，和 python api.py 是同一个服务。")
+@_config_option
+@click.option("--host", default="127.0.0.1", show_default=True, help="监听地址，默认只接受本机访问")
+@click.option("--port", type=click.IntRange(min=1, max=65535), default=8000, show_default=True, help="监听端口")
+def serve(config_path: str | None, host: str, port: int) -> None:
+    from api import serve as run_api
+
+    run_api(config_path, host, port)
 
 
 @cli.command(help="按 sqlite 中的 chunk 原文重算向量并重建 Chroma。BM25 和原文都不动。")
