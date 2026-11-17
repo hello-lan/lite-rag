@@ -10,9 +10,11 @@ from lite_rag.store import (
     fetch_chunks,
     filter_chunk_ids,
     get_model,
+    keep_model_loaded,
     load_bm25,
     open_chroma,
     open_collection,
+    release_model,
     tokenize,
 )
 
@@ -61,7 +63,12 @@ def vector_search(
     else:
         count = total
     model = get_model(cfg)
-    vector = embed_texts(model, [question], cfg, is_query=True)[0]
+    try:
+        vector = embed_texts(model, [question], cfg, is_query=True)[0]
+    finally:
+        if not keep_model_loaded(cfg):
+            model = None
+            release_model()
     query = {
         "query_embeddings": [vector],
         "n_results": min(top_k, count),

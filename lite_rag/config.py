@@ -64,6 +64,10 @@ def load_config(path: Path | None = None) -> dict:
     mode = cfg["retrieval"]["mode"]
     if mode not in {"hybrid", "bm25", "vector"}:
         raise SystemExit("retrieval.mode 只能是 hybrid、bm25 或 vector")
+    embedding = cfg.get("embedding")
+    if isinstance(embedding, dict) and "keep_in_memory" in embedding:
+        if not isinstance(embedding["keep_in_memory"], bool):
+            raise SystemExit("embedding.keep_in_memory 只能是 true 或 false")
     return cfg
 
 

@@ -26,6 +26,9 @@ embedding:
   # BGE-M3 稠密检索不需要查询指令前缀
   query_instruction: ""
   device: "auto" # auto | cpu | cuda
+  # true：查询服务启动时加载并常驻，后续请求直接编码
+  # false：每次向量检索临时加载，本次请求结束后释放
+  keep_in_memory: false
 
 retrieval:
   # hybrid：BM25 + 向量，RRF 融合（默认）

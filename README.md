@@ -172,6 +172,8 @@ python main.py serve --host 127.0.0.1 --port 8100
 
 `python api.py` 和 `python main.py serve` 启动的是同一个查询接口。
 
+`embedding.keep_in_memory` 控制向量模型是否常驻。设为 `true` 时，服务启动就加载模型，后续请求直接编码；设为 `false` 时，每次向量检索临时加载，请求结束后释放。启动参数可以覆盖配置：`python api.py --keep-model` 或 `python main.py serve --no-keep-model`。`GET /health` 会返回 `keep_in_memory` 和 `model_loaded`。
+
 默认只监听本机的 `8100` 端口。`POST /retrieve` 只返回命中，不调用大模型。`POST /query` 仍可按 `answer` 或 `llm.enabled` 生成回答。接口用 FastAPI，请求体由模型校验：`question` 必填且不能为空白，`mode` 只能是 `hybrid`、`bm25` 或 `vector`，`top_k` 必须是大于 0 的整数，`answer` 必须是布尔值。可选筛选是 `scope`（`company` 或 `knowledge`）、`doc_type`、`company`、`stock_code` 和 `year`。`mode`、`top_k`、`answer` 不传时分别使用 `retrieval.mode`、`retrieval.top_k` 和 `llm.enabled`。字段不合法时返回 422，字段说明见 `http://127.0.0.1:8100/docs`。`GET /health` 返回服务是否在运行，以及索引文件是否存在。
 
 ```powershell

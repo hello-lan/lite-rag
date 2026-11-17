@@ -138,10 +138,16 @@ def query(
 @_config_option
 @click.option("--host", default="127.0.0.1", show_default=True, help="监听地址，默认只接受本机访问")
 @click.option("--port", type=click.IntRange(min=1, max=65535), default=8100, show_default=True, help="监听端口")
-def serve(config_path: str | None, host: str, port: int) -> None:
+@click.option(
+    "--keep-model/--no-keep-model",
+    "keep_model",
+    default=None,
+    help="向量模型是否常驻内存。不传则使用 embedding.keep_in_memory",
+)
+def serve(config_path: str | None, host: str, port: int, keep_model: bool | None) -> None:
     from api import serve as run_api
 
-    run_api(config_path, host, port)
+    run_api(config_path, host, port, keep_model=keep_model)
 
 
 @cli.command(help="按 sqlite 中的 chunk 原文重算向量并重建 Chroma。BM25 和原文都不动。")

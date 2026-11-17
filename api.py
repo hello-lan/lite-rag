@@ -6,6 +6,7 @@ import argparse
 import copy
 import json
 import threading
+from contextlib import asynccontextmanager
 from typing import Literal
 
 import uvicorn
@@ -16,8 +17,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from lite_rag.answer import generate_answer
-from lite_rag.config import configure_stdio, load_config, resolve_path
+from lite_rag.config import configure_stdio, load_config, log, resolve_path
 from lite_rag.search import retrieve
+from lite_rag.store import get_model, keep_model_loaded, model_is_loaded, release_model
 
 Mode = Literal["hybrid", "bm25", "vector"]
 Scope = Literal["company", "knowledge"]
@@ -111,10 +113,21 @@ def _exit_message(exc: SystemExit) -> str:
     return "查询失败"
 
 
-def create_app(config_path: str | None = None) -> FastAPI:
+def create_app(config_path: str | None = None, keep_model: bool | None = None) -> FastAPI:
     configure_stdio()
     base_cfg = load_config(config_path)
-    app = FastAPI(title="财报 RAG", default_response_class=UTF8JSONResponse)
+    if keep_model is not None:
+        base_cfg.setdefault("embedding", {})["keep_in_memory"] = keep_model
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if keep_model_loaded(base_cfg):
+            get_model(base_cfg)
+            log.info("embedding 模型已常驻内存")
+        yield
+        release_model()
+
+    app = FastAPI(title="财报 RAG", default_response_class=UTF8JSONResponse, lifespan=lifespan)
     query_lock = threading.Lock()
 
     @app.exception_handler(RequestValidationError)
@@ -150,7 +163,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         db_path = resolve_path(base_cfg, base_cfg["paths"]["meta_db"])
-        return {"status": "ok", "index_ready": db_path.is_file()}
+        return {
+            "status": "ok",
+            "index_ready": db_path.is_file(),
+            "keep_in_memory": keep_model_loaded(base_cfg),
+            "model_loaded": model_is_loaded(),
+        }
 
     @app.post("/retrieve", response_model=RetrieveResponse)
     def retrieve_only(body: RetrieveRequest) -> RetrieveResponse:
@@ -185,8 +203,13 @@ def create_app(config_path: str | None = None) -> FastAPI:
     return app
 
 
-def serve(config_path: str | None = None, host: str = "127.0.0.1", port: int = 8100) -> None:
-    uvicorn.run(create_app(config_path), host=host, port=port)
+def serve(
+    config_path: str | None = None,
+    host: str = "127.0.0.1",
+    port: int = 8100,
+    keep_model: bool | None = None,
+) -> None:
+    uvicorn.run(create_app(config_path, keep_model=keep_model), host=host, port=port)
 
 
 def main() -> None:
@@ -194,8 +217,14 @@ def main() -> None:
     parser.add_argument("--config", default=None, help="配置文件路径，默认使用项目里的 config.yaml")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认只接受本机访问")
     parser.add_argument("--port", type=int, default=8100, help="监听端口，默认 8100")
+    parser.add_argument(
+        "--keep-model",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="向量模型是否常驻内存。不传则使用 embedding.keep_in_memory",
+    )
     args = parser.parse_args()
-    serve(args.config, args.host, args.port)
+    serve(args.config, args.host, args.port, keep_model=args.keep_model)
 
 
 if __name__ == "__main__":

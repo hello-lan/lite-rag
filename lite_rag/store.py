@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import pickle
@@ -319,6 +320,32 @@ def resolve_embedding_source(cfg: dict) -> str:
     if path.is_dir():
         return str(path)
     return name
+
+
+def keep_model_loaded(cfg: dict) -> bool:
+    """查询路径是否在本次编码后继续持有 embedding 模型。缺省为不常驻。"""
+    embedding = cfg.get("embedding") or {}
+    return bool(embedding.get("keep_in_memory", False))
+
+
+def model_is_loaded() -> bool:
+    return _model is not None
+
+
+def release_model() -> None:
+    """丢掉进程内的 embedding 模型，便于下一次检索重新加载。"""
+    global _model
+    if _model is None:
+        return
+    _model = None
+    log.info("释放 embedding 模型")
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def get_model(cfg: dict):
