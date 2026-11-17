@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.py[cod]
 .python-version
+data/
 chroma_db/
 models/
 meta.db

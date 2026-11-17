@@ -7,13 +7,13 @@
 ## 目录
 
 ```
-docs/            财报 PDF、Markdown
+docs/            财报 PDF、Markdown，采集脚本也写到这里
 models/bge-m3/   本地 BGE-M3 模型
-chroma_db/       Chroma 向量，入库后自动生成
-meta.db          sqlite，保存 chunk 原文和来源
-bm25_index.pkl   BM25 索引，与 sqlite 的 chunk id 对齐
+data/            入库生成的索引：meta.db、bm25_index.pkl、chroma/
 config.yaml      切分、模型、召回条数、大模型
-rag.py           命令行入口：ingest、query、reembed
+main.py          命令行入口：ingest、query、reembed
+lite_rag/        解析、索引、检索、回答
+scripts/         上证 e 互动、深交所互动易采集
 ```
 
 `docs/` 里有两份虚构的星澜科技示例，用来先跑通流程。真实财报直接放进 `docs/` 即可。
@@ -46,15 +46,24 @@ $env:HF_ENDPOINT="https://hf-mirror.com"
 只想确认 PDF / Markdown 能不能切开、暂时不下载模型：
 
 ```powershell
-python rag.py ingest --check
+python main.py ingest --check
 ```
 
-内存紧张时，把 `config.yaml` 里的 `embedding.model_name` 临时改成 `BAAI/bge-small-zh-v1.5`，确认流程后再换回 `BAAI/bge-m3`，并执行 `python rag.py reembed`。
+内存紧张时，把 `config.yaml` 里的 `embedding.model_name` 临时改成 `BAAI/bge-small-zh-v1.5`，确认流程后再换回 `BAAI/bge-m3`，并执行 `python main.py reembed`。
+
+## 采集
+
+问答先写成 Markdown，再和财报一起入库。两个脚本共用代码列表、文本清洗和写出，站点解析各自保留。
+
+```powershell
+python scripts/crawl_sse.py --code 600519
+python scripts/crawl_irm.py --code 000001
+```
 
 ## 入库
 
 ```powershell
-python rag.py ingest
+python main.py ingest
 ```
 
 支持 `.pdf`、`.md`、`.markdown`。文字版 PDF 用 pypdf 抽文本，Markdown 用 marko 抽文本（含表格）。扫出来的图片版财报抽不到字，需要另外做 OCR，本项目不包含这一步。
@@ -62,17 +71,17 @@ python rag.py ingest
 再次运行时，原文和切分配置都没变的文件会跳过。文件从 `docs/` 删除后，对应 chunk 会从 sqlite、Chroma 和 BM25 里清掉。
 
 ```powershell
-python rag.py ingest --force       # 全部重新切分并写入
-python rag.py ingest --bm25-only   # 只按 sqlite 重建 BM25
+python main.py ingest --force       # 全部重新切分并写入
+python main.py ingest --bm25-only   # 只按 sqlite 重建 BM25
 ```
 
 ## 查询
 
 ```powershell
-python rag.py query 2025年毛利率是多少
-python rag.py query 公司主要风险有哪些 --mode vector
-python rag.py query 分红方案 --mode bm25
-python rag.py query 2025年资本开支是多少 --mode hybrid --top-k 4
+python main.py query 2025年毛利率是多少
+python main.py query 公司主要风险有哪些 --mode vector
+python main.py query 分红方案 --mode bm25
+python main.py query 2025年资本开支是多少 --mode hybrid --top-k 4
 ```
 
 默认打印命中的原文。`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。
@@ -83,7 +92,7 @@ python rag.py query 2025年资本开支是多少 --mode hybrid --top-k 4
 
 ```powershell
 $env:DEEPSEEK_API_KEY="你的密钥"
-python rag.py query 2025年毛利率是多少 --answer
+python main.py query 2025年毛利率是多少 --answer
 ```
 
 也可以把 `config.yaml` 里的 `llm.enabled` 改成 `true`，查询时就会自动调用。`--no-answer` 可以临时关掉。
@@ -91,11 +100,11 @@ python rag.py query 2025年毛利率是多少 --answer
 ## 更换 embedding
 
 1. 修改 `config.yaml` 的 `embedding.model_name`（以及需要区分的 `embedding.version`）。
-2. 执行 `python rag.py reembed`。
+2. 执行 `python main.py reembed`。
 
 脚本会读出 sqlite 里的全部 `chunk_text`，清空 Chroma 后写入新向量，并更新 `embed_model_name`。BM25 不重建。
 
-改 `chunk_size`、`chunk_overlap` 或 `split.version` 才需要重新执行 `python rag.py ingest`。这时原文变了，BM25 会一起重建。
+改 `chunk_size`、`chunk_overlap` 或 `split.version` 才需要重新执行 `python main.py ingest`。这时原文变了，BM25 会一起重建。
 
 ## 边界
 

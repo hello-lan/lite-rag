@@ -39,9 +39,10 @@ retrieval:
 
 paths:
   docs_dir: docs
-  chroma_dir: chroma_db
-  meta_db: meta.db
-  bm25_index: bm25_index.pkl
+  # 入库生成的 sqlite、BM25 和 Chroma 都放在 data/
+  chroma_dir: data/chroma
+  meta_db: data/meta.db
+  bm25_index: data/bm25_index.pkl
   collection_name: finance_chunks
 
 llm:
