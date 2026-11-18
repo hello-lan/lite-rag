@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 
 from lite_rag.answer import generate_answer
@@ -43,23 +45,37 @@ def print_hits(mode: str, hits: list[dict], filt: SearchFilter | None = None) ->
         print()
 
 
-@cli.command(help="把 docs/raw 中的 PDF 和 Markdown 切分后写入财报 RAG 索引。")
+@cli.command(help="把 PDF 和 Markdown 切分后写入财报 RAG 索引。默认读取配置里的 paths.docs_dir。")
 @_config_option
 @click.option("--force", is_flag=True, help="忽略未改动的文档，全部重新切分并写入向量")
 @click.option("--check", is_flag=True, help="只解析和切分，不下载模型，也不写数据库")
 @click.option("--bm25-only", is_flag=True, help="不重新解析文档，只按 sqlite 里的原文重建 BM25")
-def ingest(config_path: str | None, force: bool, check: bool, bm25_only: bool) -> None:
+@click.option(
+    "--dir",
+    "docs_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="本次读取的文档目录。相对路径相对项目根目录。不传则使用 paths.docs_dir",
+)
+def ingest(config_path: str | None, force: bool, check: bool, bm25_only: bool, docs_dir: Path | None) -> None:
     cfg = load_config(config_path)
-    ingest_documents(cfg, force=force, check=check, bm25_only=bm25_only)
+    ingest_documents(cfg, force=force, check=check, bm25_only=bm25_only, docs_dir=docs_dir)
 
 
-@cli.command("ingest-split", help="把 docs/split 中已切分的 JSON 嵌入并写入索引，不再切分。")
+@cli.command("ingest-split", help="把已切分的 JSON 嵌入并写入索引，不再切分。默认读取配置里的 paths.split_dir。")
 @_config_option
 @click.option("--force", is_flag=True, help="即使文本和元信息没变，也重新嵌入并写入")
 @click.option("--check", is_flag=True, help="只校验 JSON，不下载模型，也不写数据库")
-def ingest_split(config_path: str | None, force: bool, check: bool) -> None:
+@click.option(
+    "--dir",
+    "split_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="本次读取的 JSON 目录。相对路径相对项目根目录。不传则使用 paths.split_dir",
+)
+def ingest_split(config_path: str | None, force: bool, check: bool, split_dir: Path | None) -> None:
     cfg = load_config(config_path)
-    ingest_split_documents(cfg, force=force, check=check)
+    ingest_split_documents(cfg, force=force, check=check, split_dir=split_dir)
 
 
 @cli.command(help="按 BM25、向量或 RRF 混合检索财报 chunk，可选调用大模型生成回答。")

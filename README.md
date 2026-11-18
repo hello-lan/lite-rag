@@ -7,15 +7,17 @@
 ## 目录
 
 ```
-docs/raw/company/filing/     年报、半年报、季报
-docs/raw/company/ir_qa/      互动易、上证 e 互动
-docs/raw/company/survey/     投资者调研
-docs/raw/company/research/   研报
-docs/raw/company/news/       新闻
-docs/raw/knowledge/theory/   投资理论
-docs/raw/knowledge/beginner/ 投资入门答疑
-docs/raw/sse、docs/raw/irm   采集脚本的默认输出，也记成互动问答
-docs/split/                  已经切好的 JSON，入库时只做嵌入
+corpus/02_processed/company/filing/     年报、半年报、季报
+corpus/02_processed/company/ir_qa/      互动易、上证 e 互动
+corpus/02_processed/company/survey/     投资者调研
+corpus/02_processed/company/research/   研报
+corpus/02_processed/company/news/       新闻
+corpus/02_processed/knowledge/theory/   投资理论
+corpus/02_processed/knowledge/beginner/ 投资入门答疑
+corpus/raw/sse、corpus/raw/irm       采集脚本的默认输出，入库时用 --dir 或改 --output
+corpus/03_splited/                  已经切好的 JSON，入库时只做嵌入
+corpus/tangchao/               唐朝书房原文
+corpus/BRK-Annual-Meeting/     伯克希尔股东大会记录
 models/bge-m3/               本地 BGE-M3 模型
 data/                        入库生成的索引：meta.db、bm25_index.pkl、chroma/
 config.yaml                  切分、模型、召回条数、大模型
@@ -25,9 +27,9 @@ lite_rag/                    解析、索引、检索、回答
 scripts/                     上证 e 互动、深交所互动易采集
 ```
 
-直接放在 `docs/raw/` 根目录、且不在上述子目录里的文件，记成公司定期报告。文件名用 `600519_贵州茅台_2024年报.pdf` 这种形式时，会解析出代码、简称、年份和报告期。一份文件的所有 chunk 共用这一套元信息。
+直接放在 `corpus/02_processed/` 根目录、且不在上述子目录里的文件，记成公司定期报告。文件名用 `600519_贵州茅台_2024年报.pdf` 这种形式时，会解析出代码、简称、年份和报告期。一份文件的所有 chunk 共用这一套元信息。
 
-材料如果还在 `docs/company`、`docs/knowledge`、`docs/sse`、`docs/irm`，挪到 `docs/raw/` 下的同样位置。相对 `docs/raw` 的路径不变时，已经入库的文档 id 也不变。
+材料如果还在旧的 `docs/` 或 `corpus/raw/`，原文挪到 `corpus/02_processed/` 下的同样位置，已经切好的 JSON 挪到 `corpus/03_splited/`。相对这两个目录的路径不变时，已经入库的文档 id 也不变。
 
 ## 环境
 
@@ -64,19 +66,22 @@ python main.py ingest --check
 
 ## 采集
 
-问答先写成 Markdown，再和财报一起入库。两个脚本共用代码列表、文本清洗和写出，站点解析各自保留。默认分别写到 `docs/raw/sse` 和 `docs/raw/irm`，入库时记成互动问答。要和上面的目录对齐，可以把 `--output` 指到 `docs/raw/company/ir_qa`。
+问答先写成 Markdown，再和财报一起入库。两个脚本共用代码列表、文本清洗和写出，站点解析各自保留。默认分别写到 `corpus/raw/sse` 和 `corpus/raw/irm`。要交给默认入库目录，可以把 `--output` 指到 `corpus/02_processed/company/ir_qa`，或入库时加上 `--dir corpus/raw`。`sse`、`irm` 这两个目录名入库时记成互动问答。
 
 ```powershell
 python scripts/crawl_sse.py --code 600519
 python scripts/crawl_irm.py --code 000001
-python scripts/crawl_sse.py --code 600519 --output docs/raw/company/ir_qa
+python scripts/crawl_sse.py --code 600519 --output corpus/02_processed/company/ir_qa
 ```
 
 ## 入库
 
 ```powershell
 python main.py ingest
+python main.py ingest --dir corpus/02_processed/company/filing
 ```
+
+不传 `--dir` 时读取 `paths.docs_dir`，默认是 `corpus/02_processed`。相对路径相对项目根目录。指定目录落在 `corpus/02_processed` 里面时，文档 id 仍相对这个配置目录，并且只清理该子目录里已经不见的文件。指定目录在配置目录外面时，id 相对本次目录，也只清理这次扫到的范围。
 
 支持 `.pdf`、`.md`、`.markdown`。文字版 PDF 用 pypdf 抽文本，Markdown 用 marko 抽文本（含表格）。扫出来的图片版财报抽不到字，需要另外做 OCR，本项目不包含这一步。
 
@@ -97,7 +102,7 @@ title: 贵州茅台2025年一季报点评
 
 `stock_code` 建议加引号，避免 `000001` 被 YAML 当成数字。`period` 写成 `2024`、`2024Q1` 或 `2024H1`。没有的文本字段留空，没有的年份记为 0。
 
-再次运行时，原文和切分配置都没变的文件会跳过；只有元信息变了时，只更新 sqlite 和 Chroma 的标签，不重新算向量。文件从 `docs/raw/` 删除后，对应 chunk 会从 sqlite、Chroma 和 BM25 里清掉。`docs/split/` 里的 JSON 不在这次扫描里，不会被删掉。
+再次运行时，原文和切分配置都没变的文件会跳过；只有元信息变了时，只更新 sqlite 和 Chroma 的标签，不重新算向量。文件从 `corpus/02_processed/` 删除后，对应 chunk 会从 sqlite、Chroma 和 BM25 里清掉。`corpus/03_splited/` 里的 JSON 不在这次扫描里，不会被删掉。用 `--dir` 只扫一个子目录时，这个子目录以外的 PDF 和 Markdown 也不会被删掉。
 
 旧的 `data/` 索引没有这套字段。下次 `python main.py ingest` 或 `python main.py ingest-split` 会删掉旧 sqlite、Chroma 和 BM25，再按这次扫描的目录重新入库。`--bm25-only` 和 `reembed` 不会动旧库，遇到旧结构会提示先完整入库。
 
@@ -108,7 +113,7 @@ python main.py ingest --bm25-only   # 只按 sqlite 重建 BM25
 
 ## 预切分入库
 
-问答这类材料不适合按 `chunk_size` 切开时，用自己的脚本先切好，存成 JSON，再只做嵌入和入库。一个 JSON 文件对应一份逻辑文档，可以放在 `docs/split/` 的任意子目录里。类型以文件里的 `meta` 为准，不看子目录名字。
+问答这类材料不适合按 `chunk_size` 切开时，用自己的脚本先切好，存成 JSON，再只做嵌入和入库。一个 JSON 文件对应一份逻辑文档，可以放在 `corpus/03_splited/` 的任意子目录里。类型以文件里的 `meta` 为准，不看子目录名字。
 
 `meta` 的字段和 Markdown 文首相同。`scope` 和 `doc_type` 必填，其余可以不写。单条 chunk 可以改自己的年份、日期或其他字段，没写的继承文档级 `meta`。`split` 用来标记这套切分；不写时记为 `external`。改 `config.yaml` 里的 `chunk_size` 不会重算这些 chunk，文本或 `split` 变了才会重写。
 
@@ -136,7 +141,7 @@ python main.py ingest-split           # 嵌入并写入
 python main.py ingest-split --force   # 即使没变也重新嵌入
 ```
 
-`ingest-split` 只删除 `docs/split/` 里已经不见的 JSON。`docs/raw/` 里的 PDF 和 Markdown 留在索引中。两边都写入之后，`python main.py reembed` 会按 sqlite 里的全部原文重算向量。
+`ingest-split` 只删除 `corpus/03_splited/` 里已经不见的 JSON。`corpus/02_processed/` 里的 PDF 和 Markdown 留在索引中。两边都写入之后，`python main.py reembed` 会按 sqlite 里的全部原文重算向量。
 
 ## 查询
 
@@ -190,7 +195,7 @@ Invoke-RestMethod http://127.0.0.1:8100/retrieve -Method Post -ContentType "appl
 
 脚本会读出 sqlite 里的全部 `chunk_text`，清空 Chroma 后写入新向量，并更新 `embed_model_name`。BM25 不重建。
 
-改 `chunk_size`、`chunk_overlap` 或 `split.version` 才需要重新执行 `python main.py ingest`。这时原文变了，BM25 会一起重建。`docs/split/` 里的 JSON 不走这套切分；要更新它们，改 JSON 后再运行 `python main.py ingest-split`。
+改 `chunk_size`、`chunk_overlap` 或 `split.version` 才需要重新执行 `python main.py ingest`。这时原文变了，BM25 会一起重建。`corpus/03_splited/` 里的 JSON 不走这套切分；要更新它们，改 JSON 后再运行 `python main.py ingest-split`。
 
 ## 边界
 

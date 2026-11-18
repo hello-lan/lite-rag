@@ -1,4 +1,4 @@
-"""把 docs/raw 写入索引，把 docs/split 的预切分 JSON 嵌入入库，或只按 sqlite 原文重算向量。"""
+"""把 corpus/02_processed 写入索引，把 corpus/03_splited 的预切分 JSON 嵌入入库，或只按 sqlite 原文重算向量。"""
 
 from __future__ import annotations
 
@@ -53,6 +53,37 @@ def split_dir_of(cfg: dict) -> Path:
     return resolve_path(cfg, raw)
 
 
+def docs_dir_of(cfg: dict) -> Path:
+    raw = (cfg.get("paths") or {}).get("docs_dir")
+    if not raw:
+        raise SystemExit("配置缺少 paths.docs_dir")
+    return resolve_path(cfg, raw)
+
+
+def _scan_dirs(configured: Path, directory: Path | str | None, cfg: dict) -> tuple[Path, Path]:
+    """返回本次扫描目录，以及计算文档 id 用的根目录。
+
+    指定目录落在配置目录里面时，id 仍相对配置目录。
+    只扫一个子目录时，已经入库的文档不会被当成新文档。
+    """
+    if directory is None:
+        return configured, configured
+    chosen = resolve_path(cfg, directory)
+    try:
+        chosen.resolve().relative_to(configured.resolve())
+    except ValueError:
+        return chosen, chosen
+    return chosen, configured
+
+
+def split_scan_dirs(cfg: dict, directory: Path | str | None) -> tuple[Path, Path]:
+    return _scan_dirs(split_dir_of(cfg), directory, cfg)
+
+
+def docs_scan_dirs(cfg: dict, directory: Path | str | None) -> tuple[Path, Path]:
+    return _scan_dirs(docs_dir_of(cfg), directory, cfg)
+
+
 def _path_under(source_path: str, directory: Path, root: Path) -> bool:
     if not source_path:
         return False
@@ -100,12 +131,12 @@ def prune_missing(
     return removed
 
 
-def check_documents(docs_dir, cfg: dict) -> None:
-    files = iter_source_files(docs_dir)
+def check_documents(scan_dir: Path, id_root: Path, cfg: dict) -> None:
+    files = iter_source_files(scan_dir)
     if not files:
-        raise SystemExit(f"{docs_dir} 里没有 PDF 或 Markdown。请把材料放进该目录。")
+        raise SystemExit(f"{scan_dir} 里没有 PDF 或 Markdown。请把材料放进该目录。")
     for path in files:
-        text, doc, warning = load_source(docs_dir, path)
+        text, doc, warning = load_source(id_root, path)
         if warning:
             log.warning(warning)
         if not text:
@@ -252,13 +283,22 @@ def ingest_file(conn, collection, cfg, docs_dir, path, force: bool) -> str:
     )
 
 
-def ingest_documents(cfg: dict, *, force: bool, check: bool, bm25_only: bool) -> None:
-    docs_dir = resolve_path(cfg, cfg["paths"]["docs_dir"])
+def ingest_documents(
+    cfg: dict,
+    *,
+    force: bool,
+    check: bool,
+    bm25_only: bool,
+    docs_dir: Path | str | None = None,
+) -> None:
+    directory, id_root = docs_scan_dirs(cfg, docs_dir)
     db_path = resolve_path(cfg, cfg["paths"]["meta_db"])
     bm25_path = resolve_path(cfg, cfg["paths"]["bm25_index"])
 
     if check:
-        check_documents(docs_dir, cfg)
+        if not directory.exists():
+            raise SystemExit(f"文档目录不存在: {directory}")
+        check_documents(directory, id_root, cfg)
         return
 
     if bm25_only:
@@ -278,32 +318,34 @@ def ingest_documents(cfg: dict, *, force: bool, check: bool, bm25_only: bool) ->
 
     reset = init_meta_db(db_path)
     if reset:
-        log.info("旧索引已删除，将按 docs/raw 重新入库。预切分 JSON 需要再运行 python main.py ingest-split")
+        log.info("旧索引已删除，将按 %s 重新入库。预切分 JSON 需要再运行 python main.py ingest-split", directory)
         if bm25_path.exists():
             bm25_path.unlink()
         open_collection(open_chroma(cfg), cfg, reset=True)
     conn = connect_db(db_path)
     try:
-        if not docs_dir.exists():
-            raise SystemExit(f"文档目录不存在: {docs_dir}")
-        files = iter_source_files(docs_dir)
+        if not directory.exists():
+            raise SystemExit(f"文档目录不存在: {directory}")
+        files = iter_source_files(directory)
         if not files:
-            raise SystemExit(f"{docs_dir} 里没有 PDF 或 Markdown。")
+            raise SystemExit(f"{directory} 里没有 PDF 或 Markdown。")
 
         client = open_chroma(cfg)
         collection = open_collection(client, cfg)
+        narrowed = directory.resolve() != docs_dir_of(cfg).resolve()
         removed = prune_missing(
             conn,
             collection,
-            live_ids={source_doc_id(docs_dir, path) for path in files},
+            live_ids={source_doc_id(id_root, path) for path in files},
             root=cfg["_root"],
             skip_under=split_dir_of(cfg),
+            only_under=directory if narrowed else None,
         )
         conn.commit()
         counts = {"written": 0, "repaired": 0, "retagged": 0, "skipped": 0, "empty": 0, "dropped": 0}
         for path in files:
             try:
-                status = ingest_file(conn, collection, cfg, docs_dir, path, force)
+                status = ingest_file(conn, collection, cfg, id_root, path, force)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -354,7 +396,7 @@ def check_split_documents(split_dir: Path) -> None:
         )
 
 
-def ingest_split_file(conn, collection, cfg, split_dir, path, force: bool) -> str:
+def ingest_split_file(conn, collection, cfg, split_dir, path, force: bool, *, id_root: Path) -> str:
     try:
         texts, docs, split_cfg = load_split_file(path)
     except ValueError as exc:
@@ -363,7 +405,7 @@ def ingest_split_file(conn, collection, cfg, split_dir, path, force: bool) -> st
         conn,
         collection,
         cfg,
-        doc_id=source_doc_id(split_dir, path),
+        doc_id=source_doc_id(id_root, path),
         source_name=path.name,
         source_path=relative_to_root(cfg, path),
         texts=texts,
@@ -373,45 +415,51 @@ def ingest_split_file(conn, collection, cfg, split_dir, path, force: bool) -> st
     )
 
 
-def ingest_split_documents(cfg: dict, *, force: bool, check: bool) -> None:
-    split_dir = split_dir_of(cfg)
+def ingest_split_documents(
+    cfg: dict,
+    *,
+    force: bool,
+    check: bool,
+    split_dir: Path | str | None = None,
+) -> None:
+    directory, id_root = split_scan_dirs(cfg, split_dir)
     db_path = resolve_path(cfg, cfg["paths"]["meta_db"])
     bm25_path = resolve_path(cfg, cfg["paths"]["bm25_index"])
 
     if check:
-        if not split_dir.exists():
-            raise SystemExit(f"预切分目录不存在: {split_dir}")
-        check_split_documents(split_dir)
+        if not directory.exists():
+            raise SystemExit(f"预切分目录不存在: {directory}")
+        check_split_documents(directory)
         return
 
     reset = init_meta_db(db_path)
     if reset:
-        log.info("旧索引已删除，这次只写入 docs/split。PDF 和 Markdown 需要再运行 python main.py ingest")
+        log.info("旧索引已删除，这次只写入 %s。PDF 和 Markdown 需要再运行 python main.py ingest", directory)
         if bm25_path.exists():
             bm25_path.unlink()
         open_collection(open_chroma(cfg), cfg, reset=True)
     conn = connect_db(db_path)
     try:
-        if not split_dir.exists():
-            raise SystemExit(f"预切分目录不存在: {split_dir}")
-        files = iter_split_files(split_dir)
+        if not directory.exists():
+            raise SystemExit(f"预切分目录不存在: {directory}")
+        files = iter_split_files(directory)
         if not files:
-            raise SystemExit(f"{split_dir} 里没有 JSON。")
+            raise SystemExit(f"{directory} 里没有 JSON。")
 
         client = open_chroma(cfg)
         collection = open_collection(client, cfg)
         removed = prune_missing(
             conn,
             collection,
-            live_ids={source_doc_id(split_dir, path) for path in files},
+            live_ids={source_doc_id(id_root, path) for path in files},
             root=cfg["_root"],
-            only_under=split_dir,
+            only_under=directory,
         )
         conn.commit()
         counts = {"written": 0, "repaired": 0, "retagged": 0, "skipped": 0}
         for path in files:
             try:
-                status = ingest_split_file(conn, collection, cfg, split_dir, path, force)
+                status = ingest_split_file(conn, collection, cfg, directory, path, force, id_root=id_root)
                 conn.commit()
             except Exception:
                 conn.rollback()

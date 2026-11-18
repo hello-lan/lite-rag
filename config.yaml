@@ -41,9 +41,9 @@ retrieval:
   rrf_k: 60
 
 paths:
-  # PDF、Markdown 放在 docs/raw，已切分的 JSON 放在 docs/split
-  docs_dir: docs/raw
-  split_dir: docs/split
+  # PDF、Markdown 放在 corpus/02_processed，已切分的 JSON 放在 corpus/03_splited
+  docs_dir: corpus/02_processed
+  split_dir: corpus/03_splited
   # 入库生成的 sqlite、BM25 和 Chroma 都放在 data/
   chroma_dir: data/chroma
   meta_db: data/meta.db

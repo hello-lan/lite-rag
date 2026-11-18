@@ -13,5 +13,6 @@ bm25_index.pkl
 .idea/
 .vscode/
 .DS_Store
-docs/
+corpus/raw/
+corpus/03_splited/
 *.pdf

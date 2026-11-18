@@ -1,4 +1,4 @@
-"""从 docs/raw 读出 PDF 和 Markdown，或读入 docs/split 里已切分的 JSON。"""
+"""从 corpus/02_processed 读出 PDF 和 Markdown，或读入 corpus/03_splited 里已切分的 JSON。"""
 
 from __future__ import annotations
 
