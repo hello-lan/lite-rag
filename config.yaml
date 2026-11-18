@@ -54,8 +54,8 @@ paths:
     filing: financial_report
 
 llm:
-  # HTTP 默认只返回命中原文。设为 true 后，POST /query 不传 answer 时会调用大模型。
-  # 命令行 --answer 仍可根据命中材料生成回答。
+  # HTTP：POST /query 不传 answer 时是否调用大模型。
+  # 命令行：不传 --output 时，true 打印命中和回答，false 只打印命中。
   enabled: false
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"

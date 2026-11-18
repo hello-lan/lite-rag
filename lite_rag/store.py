@@ -22,6 +22,7 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.isolation_level = "DEFERRED"
+    _rename_author_column(conn)
     return conn
 
 
@@ -75,6 +76,8 @@ def _rename_author_column(conn: sqlite3.Connection) -> None:
     columns = _table_columns(conn)
     if columns is not None and "publisher" in columns and "author" not in columns:
         conn.execute("ALTER TABLE chunks RENAME COLUMN publisher TO author")
+        conn.commit()
+        log.info("已将 chunks.publisher 重命名为 author")
 
 
 def schema_is_current(db_path: Path) -> bool:

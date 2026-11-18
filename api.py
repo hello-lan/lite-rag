@@ -113,9 +113,9 @@ def _exit_message(exc: SystemExit) -> str:
     return "查询失败"
 
 
-def create_app(config_path: str | None = None, keep_model: bool | None = None) -> FastAPI:
+def create_app(keep_model: bool | None = None) -> FastAPI:
     configure_stdio()
-    base_cfg = load_config(config_path)
+    base_cfg = load_config()
     if keep_model is not None:
         base_cfg.setdefault("embedding", {})["keep_in_memory"] = keep_model
 
@@ -204,17 +204,15 @@ def create_app(config_path: str | None = None, keep_model: bool | None = None) -
 
 
 def serve(
-    config_path: str | None = None,
     host: str = "127.0.0.1",
     port: int = 8100,
     keep_model: bool | None = None,
 ) -> None:
-    uvicorn.run(create_app(config_path, keep_model=keep_model), host=host, port=port)
+    uvicorn.run(create_app(keep_model=keep_model), host=host, port=port)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="财报 RAG 查询接口")
-    parser.add_argument("--config", default=None, help="配置文件路径，默认使用项目里的 config.yaml")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址，默认只接受本机访问")
     parser.add_argument("--port", type=int, default=8100, help="监听端口，默认 8100")
     parser.add_argument(
@@ -224,7 +222,7 @@ def main() -> None:
         help="向量模型是否常驻内存。不传则使用 embedding.keep_in_memory",
     )
     args = parser.parse_args()
-    serve(args.config, args.host, args.port, keep_model=args.keep_model)
+    serve(args.host, args.port, keep_model=args.keep_model)
 
 
 if __name__ == "__main__":

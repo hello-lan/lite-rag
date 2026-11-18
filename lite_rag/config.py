@@ -47,8 +47,9 @@ def configure_stdio() -> None:
     logging.getLogger("chromadb").setLevel(logging.ERROR)
 
 
-def load_config(path: Path | None = None) -> dict:
-    cfg_path = Path(path) if path else ROOT / "config.yaml"
+def load_config() -> dict:
+    """只读取项目根目录的 config.yaml，不接受其他路径。"""
+    cfg_path = ROOT / "config.yaml"
     if not cfg_path.exists():
         raise SystemExit(f"找不到配置文件: {cfg_path}")
     with cfg_path.open(encoding="utf-8") as f:

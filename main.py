@@ -18,10 +18,6 @@ def cli() -> None:
     configure_stdio()
 
 
-def _config_option(func):
-    return click.option("--config", "config_path", default=None, help="配置文件路径，默认使用项目里的 config.yaml")(func)
-
-
 def print_hits(mode: str, hits: list[dict], filt: SearchFilter | None = None) -> None:
     line = f"模式: {mode}"
     if filt is not None and filt.active():
@@ -46,7 +42,6 @@ def print_hits(mode: str, hits: list[dict], filt: SearchFilter | None = None) ->
 
 
 @cli.command(help="把 PDF 和 Markdown 切分后写入财报 RAG 索引。默认读取配置里的 paths.docs_dir。")
-@_config_option
 @click.option("--force", is_flag=True, help="忽略未改动的文档，全部重新切分并写入向量")
 @click.option("--check", is_flag=True, help="只解析和切分，不下载模型，也不写数据库")
 @click.option("--bm25-only", is_flag=True, help="不重新解析文档，只按 sqlite 里的原文重建 BM25")
@@ -57,13 +52,12 @@ def print_hits(mode: str, hits: list[dict], filt: SearchFilter | None = None) ->
     type=click.Path(file_okay=False, path_type=Path),
     help="本次读取的文档目录。相对路径相对项目根目录。不传则使用 paths.docs_dir",
 )
-def ingest(config_path: str | None, force: bool, check: bool, bm25_only: bool, docs_dir: Path | None) -> None:
-    cfg = load_config(config_path)
+def ingest(force: bool, check: bool, bm25_only: bool, docs_dir: Path | None) -> None:
+    cfg = load_config()
     ingest_documents(cfg, force=force, check=check, bm25_only=bm25_only, docs_dir=docs_dir)
 
 
 @cli.command("ingest-split", help="把已切分的 JSON 嵌入并写入索引，不再切分。默认读取配置里的 paths.split_dir。")
-@_config_option
 @click.option("--force", is_flag=True, help="即使文本和元信息没变，也重新嵌入并写入")
 @click.option("--check", is_flag=True, help="只校验 JSON，不下载模型，也不写数据库")
 @click.option(
@@ -73,49 +67,37 @@ def ingest(config_path: str | None, force: bool, check: bool, bm25_only: bool, d
     type=click.Path(file_okay=False, path_type=Path),
     help="本次读取的 JSON 目录。相对路径相对项目根目录。不传则使用 paths.split_dir",
 )
-def ingest_split(config_path: str | None, force: bool, check: bool, split_dir: Path | None) -> None:
-    cfg = load_config(config_path)
+def ingest_split(force: bool, check: bool, split_dir: Path | None) -> None:
+    cfg = load_config()
     ingest_split_documents(cfg, force=force, check=check, split_dir=split_dir)
 
 
 @cli.command(help="按 BM25、向量或 RRF 混合检索财报 chunk，可选调用大模型生成回答。")
 @click.argument("question", nargs=-1, required=True)
-@_config_option
 @click.option("--mode", type=click.Choice(["hybrid", "bm25", "vector"]), help="覆盖 config.yaml 里的检索模式")
 @click.option("--top-k", type=click.IntRange(min=1), help="最终返回的 chunk 数")
 @click.option(
     "--output",
     type=click.Choice(["hits", "answer", "both"]),
-    help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印",
+    help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印。不传则按 llm.enabled 选择 hits 或 both",
 )
-@click.option("--answer", is_flag=True, help="用配置里的大模型根据命中材料生成回答，并和检索结果一起打印")
-@click.option("--no-answer", is_flag=True, help="即使配置开启了大模型，也只打印命中原文")
-@click.option("--scope", type=click.Choice(list(SCOPES)), help="只查公司材料 company，或投资通识 knowledge")
+@click.option("--scope", type=click.Choice(list(SCOPES)), required=True, help="查询范围：company 公司材料，knowledge 投资通识")
 @click.option("--doc-type", type=click.Choice(list(DOC_TYPES)), help="材料类型：filing、ir_qa、survey、research、news、theory、beginner")
 @click.option("--company", default=None, help="公司简称，精确匹配")
 @click.option("--code", "stock_code", default=None, help="6 位股票代码")
 @click.option("--year", type=click.IntRange(1900, 2100), help="报告期或发布年份")
 def query(
     question: tuple[str, ...],
-    config_path: str | None,
     mode: str | None,
     top_k: int | None,
     output: str | None,
-    answer: bool,
-    no_answer: bool,
-    scope: str | None,
+    scope: str,
     doc_type: str | None,
     company: str | None,
     stock_code: str | None,
     year: int | None,
 ) -> None:
-    if answer and no_answer:
-        raise click.UsageError("--answer 和 --no-answer 不能同时使用")
-    if output == "hits" and answer:
-        raise click.UsageError("--output hits 不能和 --answer 一起用")
-    if output in ("answer", "both") and no_answer:
-        raise click.UsageError(f"--output {output} 不能和 --no-answer 一起用")
-    cfg = load_config(config_path)
+    cfg = load_config()
     if mode:
         cfg["retrieval"]["mode"] = mode
     if top_k is not None:
@@ -141,8 +123,7 @@ def query(
         year=filt.year or None,
     )
     if output is None:
-        want_answer = answer or (bool(cfg["llm"].get("enabled")) and not no_answer)
-        output = "both" if want_answer else "hits"
+        output = "both" if cfg["llm"].get("enabled") else "hits"
     if output in ("hits", "both"):
         print_hits(cfg["retrieval"]["mode"], hits, filt)
     if output in ("answer", "both"):
@@ -151,7 +132,6 @@ def query(
 
 
 @cli.command(help="启动查询接口，和 python api.py 是同一个服务。")
-@_config_option
 @click.option("--host", default="127.0.0.1", show_default=True, help="监听地址，默认只接受本机访问")
 @click.option("--port", type=click.IntRange(min=1, max=65535), default=8100, show_default=True, help="监听端口")
 @click.option(
@@ -160,17 +140,16 @@ def query(
     default=None,
     help="向量模型是否常驻内存。不传则使用 embedding.keep_in_memory",
 )
-def serve(config_path: str | None, host: str, port: int, keep_model: bool | None) -> None:
+def serve(host: str, port: int, keep_model: bool | None) -> None:
     from api import serve as run_api
 
-    run_api(config_path, host, port, keep_model=keep_model)
+    run_api(host, port, keep_model=keep_model)
 
 
 @cli.command(help="按 sqlite 中的 chunk 原文重算向量并重建 Chroma。BM25 和原文都不动。")
-@_config_option
 @click.option("--force", is_flag=True, help="即使模型名和向量条数都没变，也重新写入")
-def reembed(config_path: str | None, force: bool) -> None:
-    cfg = load_config(config_path)
+def reembed(force: bool) -> None:
+    cfg = load_config()
     reembed_vectors(cfg, force=force)
 
 

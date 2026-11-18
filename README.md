@@ -146,14 +146,14 @@ python main.py ingest-split --force   # 即使没变也重新嵌入
 ## 查询
 
 ```powershell
-python main.py query 2025年毛利率是多少
-python main.py query 公司主要风险有哪些 --mode vector
-python main.py query 分红方案 --mode bm25 --code 600519 --doc-type filing
-python main.py query 2025年资本开支是多少 --mode hybrid --top-k 4 --company 贵州茅台 --year 2025
+python main.py query 2025年毛利率是多少 --scope company
+python main.py query 公司主要风险有哪些 --scope company --mode vector
+python main.py query 分红方案 --scope company --mode bm25 --code 600519 --doc-type filing
+python main.py query 2025年资本开支是多少 --scope company --mode hybrid --top-k 4 --company 贵州茅台 --year 2025
 python main.py query 什么是安全边际 --scope knowledge --doc-type theory
 ```
 
-默认打印命中的原文。`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。不传 `--scope`、`--doc-type`、`--company`、`--code`、`--year` 时搜索全部材料。传入公司或代码后，向量和 BM25 都只保留这家公司。程序不会从问题文本里猜测公司和类型。
+默认打印命中的原文。`--scope` 必填，只能是 `company` 或 `knowledge`。`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。不传 `--doc-type`、`--company`、`--code`、`--year` 时，在该范围内搜索全部材料。传入公司或代码后，向量和 BM25 都只保留这家公司。程序不会从问题文本里猜测公司和类型。
 
 混合检索时，BM25 和向量各取 `candidate_k` 条（默认 10），再按 RRF 截到 `top_k` 条（默认 4）。RRF 只看名次：`1 / (60 + rank + 1)`，不会把两种分数直接相加。
 
@@ -161,10 +161,10 @@ python main.py query 什么是安全边际 --scope knowledge --doc-type theory
 
 ```powershell
 $env:DEEPSEEK_API_KEY="你的密钥"
-python main.py query 2025年毛利率是多少 --answer
+python main.py query 2025年毛利率是多少 --scope company --output both
 ```
 
-也可以把 `config.yaml` 里的 `llm.enabled` 改成 `true`，查询时就会自动调用。`--no-answer` 可以临时关掉。
+`--output` 可以是 `hits`（只打印命中）、`answer`（只打印回答）或 `both`。不传时看 `config.yaml` 里的 `llm.enabled`：`true` 相当于 `both`，`false` 相当于 `hits`。
 
 ## 查询接口
 
