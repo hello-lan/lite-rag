@@ -36,7 +36,7 @@ _FRONT_KEYS = frozenset({
     "year",
     "period",
     "published_on",
-    "publisher",
+    "author",
 })
 _CODE_NAME = re.compile(r"^(?P<code>\d{6})[_-](?P<company>[^_\-]+)")
 _PERIOD_IN_NAME = re.compile(r"(20\d{2})\s*(Q[1-4]|H[12])", re.IGNORECASE)
@@ -56,7 +56,7 @@ class DocMeta:
     year: int
     period: str
     published_on: str
-    publisher: str
+    author: str
 
     def chroma(self) -> dict:
         return {
@@ -68,7 +68,7 @@ class DocMeta:
             "year": int(self.year),
             "period": self.period,
             "published_on": self.published_on,
-            "publisher": self.publisher,
+            "author": self.author,
         }
 
     def same_as(self, row) -> bool:
@@ -81,7 +81,7 @@ class DocMeta:
             and int(row["year"] or 0) == self.year
             and (row["period"] or "") == self.period
             and (row["published_on"] or "") == self.published_on
-            and (row["publisher"] or "") == self.publisher
+            and (row["author"] or "") == self.author
         )
 
 
@@ -99,7 +99,7 @@ def doc_from_row(row) -> DocMeta:
         year=int(row["year"] or 0),
         period=row["period"] or "",
         published_on=row["published_on"] or "",
-        publisher=row["publisher"] or "",
+        author=row["author"] or "",
     )
 
 
@@ -118,7 +118,7 @@ def _blank_values() -> dict:
         "year": 0,
         "period": "",
         "published_on": "",
-        "publisher": "",
+        "author": "",
     }
 
 
@@ -132,7 +132,7 @@ def _copy_values(doc: DocMeta) -> dict:
         "year": doc.year,
         "period": doc.period,
         "published_on": doc.published_on,
-        "publisher": doc.publisher,
+        "author": doc.author,
     }
 
 
@@ -166,7 +166,7 @@ def build_doc_meta(relative: str, stem: str, front: dict | None = None) -> tuple
         "year": parsed.get("year", 0),
         "period": parsed.get("period", ""),
         "published_on": parsed.get("published_on", ""),
-        "publisher": "",
+        "author": "",
     }
     provided = set(front or {})
     if front:
@@ -197,13 +197,13 @@ def source_label(hit: dict) -> str:
     if not period and int(hit.get("year") or 0):
         period = str(int(hit["year"]))
     published = (hit.get("published_on") or "").strip()
-    publisher = (hit.get("publisher") or "").strip()
+    author = (hit.get("author") or "").strip()
     title = (hit.get("title") or hit.get("source_name") or "").strip()
     if company and code:
         who = f"{company}（{code}）"
     else:
         who = company or code
-    bits = [bit for bit in (who, kind, period or published, publisher, title) if bit]
+    bits = [bit for bit in (who, kind, period or published, author, title) if bit]
     return " · ".join(bits)
 
 
@@ -244,11 +244,8 @@ class SearchFilter:
         return " AND ".join(clauses), params
 
     def chroma_where(self) -> dict | None:
+        """只包含向量 metadata 上的筛选。scope 和 doc_type 用来选择 collection。"""
         parts = []
-        if self.scope:
-            parts.append({"scope": self.scope})
-        if self.doc_type:
-            parts.append({"doc_type": self.doc_type})
         if self.company:
             parts.append({"company": self.company})
         if self.stock_code:
@@ -388,8 +385,8 @@ def _apply_front(values: dict, front: dict) -> None:
         values["period"] = "" if front["period"] in (None, "") else _period(front["period"])
     if "published_on" in front:
         values["published_on"] = _date(front["published_on"])
-    if "publisher" in front:
-        values["publisher"] = "" if front["publisher"] is None else str(front["publisher"]).strip()
+    if "author" in front:
+        values["author"] = "" if front["author"] is None else str(front["author"]).strip()
 
 
 def _align_year_and_period(values: dict) -> None:

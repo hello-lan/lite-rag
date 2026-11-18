@@ -48,7 +48,10 @@ paths:
   chroma_dir: data/chroma
   meta_db: data/meta.db
   bm25_index: data/bm25_index.pkl
-  collection_name: finance_chunks
+  # doc_type 对应的 Chroma collection。未列出的类型不写入向量。
+  collections:
+    theory: investment_theory
+    filing: financial_report
 
 llm:
   # HTTP 默认只返回命中原文。设为 true 后，POST /query 不传 answer 时会调用大模型。

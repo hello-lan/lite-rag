@@ -5,15 +5,20 @@ from __future__ import annotations
 from lite_rag.config import resolve_path
 from lite_rag.meta import SearchFilter, public_meta
 from lite_rag.store import (
+    chroma_where_fits,
+    collection_name,
+    configured_collection_names,
     connect_db,
+    doc_types_for_filter,
     embed_texts,
+    ensure_collections,
     fetch_chunks,
     filter_chunk_ids,
     get_model,
     keep_model_loaded,
     load_bm25,
     open_chroma,
-    open_collection,
+    open_named_collection,
     release_model,
     tokenize,
 )
@@ -49,19 +54,44 @@ def vector_search(
     question: str,
     top_k: int,
     where: dict | None = None,
+    filt: SearchFilter | None = None,
 ) -> list[tuple[int, float]]:
     client = open_chroma(cfg)
-    collection = open_collection(client, cfg)
-    total = collection.count()
-    if total <= 0:
-        raise SystemExit("向量库是空的，请先运行 python main.py ingest")
-    if where:
-        matched = collection.get(where=where, include=[])
-        count = len(matched.get("ids") or [])
-        if count <= 0:
-            return []
-    else:
-        count = total
+    ensure_collections(client, cfg)
+    chosen = filt if filt is not None else SearchFilter()
+    doc_types = doc_types_for_filter(cfg, chosen)
+    if not chroma_where_fits(doc_types, chosen):
+        return []
+    counts: list[tuple[object, int]] = []
+    for doc_type in doc_types:
+        collection = open_named_collection(client, collection_name(cfg, doc_type))
+        counts.append((collection, collection.count()))
+    if all(total <= 0 for _collection, total in counts):
+        selected = {collection_name(cfg, doc_type) for doc_type in doc_types}
+        others_have_data = any(
+            open_named_collection(client, name).count() > 0
+            for name in configured_collection_names(cfg)
+            if name not in selected
+        )
+        if not others_have_data:
+            raise SystemExit("向量库是空的，请先运行 python main.py ingest")
+        return []
+
+    searchable: list[tuple[object, int]] = []
+    for collection, total in counts:
+        if total <= 0:
+            continue
+        if where:
+            matched = collection.get(where=where, include=[])
+            count = len(matched.get("ids") or [])
+            if count <= 0:
+                continue
+        else:
+            count = total
+        searchable.append((collection, count))
+    if not searchable:
+        return []
+
     model = get_model(cfg)
     try:
         vector = embed_texts(model, [question], cfg, is_query=True)[0]
@@ -69,20 +99,25 @@ def vector_search(
         if not keep_model_loaded(cfg):
             model = None
             release_model()
-    query = {
-        "query_embeddings": [vector],
-        "n_results": min(top_k, count),
-        "include": ["distances"],
-    }
-    if where:
-        query["where"] = where
-    result = collection.query(**query)
-    ids = result.get("ids") or [[]]
-    distances = result.get("distances") or [[]]
-    hits: list[tuple[int, float]] = []
-    for chunk_id, distance in zip(ids[0], distances[0] if distances else []):
-        hits.append((int(chunk_id), float(distance)))
-    return hits
+    best: dict[int, float] = {}
+    for collection, count in searchable:
+        query = {
+            "query_embeddings": [vector],
+            "n_results": min(top_k, count),
+            "include": ["distances"],
+        }
+        if where:
+            query["where"] = where
+        result = collection.query(**query)
+        ids = result.get("ids") or [[]]
+        distances = result.get("distances") or [[]]
+        for chunk_id, distance in zip(ids[0], distances[0] if distances else []):
+            chunk_id = int(chunk_id)
+            distance = float(distance)
+            if chunk_id not in best or distance < best[chunk_id]:
+                best[chunk_id] = distance
+    ordered = sorted(best, key=lambda item: best[item])[:top_k]
+    return [(chunk_id, best[chunk_id]) for chunk_id in ordered]
 
 
 def reciprocal_rank_fusion(results_list: list[list[int]], k: int = 60) -> tuple[list[int], dict[int, float]]:
@@ -138,13 +173,13 @@ def retrieve(
             score_map = {chunk_id: score for chunk_id, score in pairs}
             score_name = "bm25"
         elif mode == "vector":
-            pairs = vector_search(cfg, question, top_k, where)
+            pairs = vector_search(cfg, question, top_k, where, filt)
             ordered_ids = [chunk_id for chunk_id, _score in pairs]
             score_map = {chunk_id: score for chunk_id, score in pairs}
             score_name = "distance"
         else:
             bm25_ids = [chunk_id for chunk_id, _score in bm25_search(cfg, question, candidate_k, allowed)]
-            vector_ids = [chunk_id for chunk_id, _score in vector_search(cfg, question, candidate_k, where)]
+            vector_ids = [chunk_id for chunk_id, _score in vector_search(cfg, question, candidate_k, where, filt)]
             fused_ids, score_map = reciprocal_rank_fusion([bm25_ids, vector_ids], k=rrf_k)
             ordered_ids = fused_ids[:top_k]
             score_name = "rrf"

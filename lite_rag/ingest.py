@@ -15,23 +15,29 @@ from lite_rag.documents import (
     source_doc_id,
     split_document,
 )
-from lite_rag.meta import DocMeta
+from lite_rag.meta import DocMeta, doc_from_row
 from lite_rag.store import (
     chroma_has_ids,
     chroma_meta,
     chroma_meta_from_row,
     chroma_update_meta,
     chroma_upsert,
+    clear_source_vectors,
+    collection_map,
+    collection_name,
+    configured_collection_names,
     connect_db,
     delete_doc,
     embed_texts,
+    ensure_collections,
     get_model,
     init_meta_db,
     insert_chunks,
     load_doc_chunks,
     open_chroma,
-    open_collection,
+    open_named_collection,
     rebuild_bm25,
+    reset_collections,
     schema_is_current,
     update_chunk_metas,
 )
@@ -104,9 +110,66 @@ def _relative(root: Path, path: Path) -> str:
         return path.name
 
 
+def _chroma_client(cfg: dict, *, reset: bool):
+    client = open_chroma(cfg)
+    if reset:
+        reset_collections(client, cfg)
+    else:
+        ensure_collections(client, cfg)
+    return client
+
+
+def _require_mapped(cfg: dict, docs: list[DocMeta], source_name: str) -> None:
+    mapping = collection_map(cfg)
+    unknown = sorted({doc.doc_type for doc in docs if doc.doc_type not in mapping})
+    if unknown:
+        kinds = "、".join(unknown)
+        raise SystemExit(f"{source_name} 的 doc_type（{kinds}）还没有对应的 Chroma collection")
+
+
+def _vectors_cover(client, cfg: dict, chunk_ids: list[int], docs: list[DocMeta]) -> bool:
+    grouped: dict[str, list[int]] = {}
+    for chunk_id, doc in zip(chunk_ids, docs):
+        grouped.setdefault(doc.doc_type, []).append(chunk_id)
+    for doc_type, ids in grouped.items():
+        collection = open_named_collection(client, collection_name(cfg, doc_type))
+        if not chroma_has_ids(collection, ids):
+            return False
+    return True
+
+
+def _upsert_groups(client, cfg: dict, ids: list[str], vectors, metas: list[dict], docs: list[DocMeta]) -> None:
+    grouped: dict[str, dict] = {}
+    for chunk_id, vector, meta, doc in zip(ids, vectors, metas, docs):
+        bucket = grouped.setdefault(doc.doc_type, {"ids": [], "vectors": [], "metas": []})
+        bucket["ids"].append(chunk_id)
+        bucket["vectors"].append(vector)
+        bucket["metas"].append(meta)
+    for doc_type, bucket in grouped.items():
+        collection = open_named_collection(client, collection_name(cfg, doc_type))
+        chroma_upsert(collection, bucket["ids"], bucket["vectors"], bucket["metas"])
+
+
+def _drop_foreign_ids(client, cfg: dict, ids: list[str], docs: list[DocMeta]) -> None:
+    for name in configured_collection_names(cfg):
+        foreign = [
+            chunk_id
+            for chunk_id, doc in zip(ids, docs)
+            if collection_name(cfg, doc.doc_type) != name
+        ]
+        if not foreign:
+            continue
+        try:
+            collection = client.get_collection(name)
+            collection.delete(ids=foreign)
+        except Exception:
+            log.debug("清理其它 collection 中的向量失败", exc_info=True)
+
+
 def prune_missing(
     conn,
-    collection,
+    client,
+    cfg: dict,
     *,
     live_ids: set[str],
     root: Path,
@@ -125,7 +188,7 @@ def prune_missing(
             continue
         if row["source_doc_id"] in live_ids:
             continue
-        delete_doc(conn, collection, row["source_doc_id"])
+        delete_doc(conn, client, cfg, row["source_doc_id"])
         removed += 1
         log.info("删除已不存在的文档: %s", row["source_name"])
     return removed
@@ -155,42 +218,44 @@ def check_documents(scan_dir: Path, id_root: Path, cfg: dict) -> None:
         )
 
 
-def upsert_existing(conn, collection, rows, cfg: dict, docs: list[DocMeta] | None = None) -> None:
+def upsert_existing(conn, client, rows, cfg: dict, docs: list[DocMeta] | None = None) -> None:
     if not rows:
         return
+    meta_docs = [docs[index] if docs is not None else doc_from_row(row) for index, row in enumerate(rows)]
+    _require_mapped(cfg, meta_docs, rows[0]["source_name"])
     model = get_model(cfg)
     texts = [row["chunk_text"] for row in rows]
     vectors = embed_texts(model, texts, cfg)
     model_name = cfg["embedding"]["model_name"]
     ids = [str(row["id"]) for row in rows]
-    metas = []
-    for index, row in enumerate(rows):
-        if docs is None:
-            metas.append(chroma_meta_from_row(row))
-        else:
-            metas.append(chroma_meta(int(row["id"]), row["source_name"], row["source_doc_id"], docs[index]))
-    for source_id in {row["source_doc_id"] for row in rows}:
-        try:
-            collection.delete(where={"source_doc_id": source_id})
-        except Exception:
-            log.debug("补写前清理旧向量失败", exc_info=True)
-    chroma_upsert(collection, ids, vectors, metas)
+    metas = [
+        chroma_meta(row["source_doc_id"], doc)
+        for row, doc in zip(rows, meta_docs)
+    ]
+    clear_source_vectors(client, cfg, {row["source_doc_id"] for row in rows}, ids)
+    _upsert_groups(client, cfg, ids, vectors, metas, meta_docs)
     conn.execute(
         f"UPDATE chunks SET embed_model_name = ? WHERE id IN ({','.join('?' * len(ids))})",
         [model_name, *[int(chunk_id) for chunk_id in ids]],
     )
 
 
-def _retag(conn, collection, rows, docs: list[DocMeta]) -> None:
+def _retag(conn, client, cfg: dict, rows, docs: list[DocMeta]) -> None:
     source_id = rows[0]["source_doc_id"]
     source_name = rows[0]["source_name"]
     chunk_ids = [int(row["id"]) for row in rows]
     update_chunk_metas(conn, chunk_ids, docs)
-    chroma_update_meta(
-        collection,
-        [str(chunk_id) for chunk_id in chunk_ids],
-        [chroma_meta(chunk_id, source_name, source_id, doc) for chunk_id, doc in zip(chunk_ids, docs)],
-    )
+    grouped: dict[str, list[tuple[int, DocMeta]]] = {}
+    for chunk_id, doc in zip(chunk_ids, docs):
+        grouped.setdefault(doc.doc_type, []).append((chunk_id, doc))
+    for doc_type, pairs in grouped.items():
+        collection = open_named_collection(client, collection_name(cfg, doc_type))
+        chroma_update_meta(
+            collection,
+            [str(chunk_id) for chunk_id, _doc in pairs],
+            [chroma_meta(source_id, doc) for _chunk_id, doc in pairs],
+        )
+    _drop_foreign_ids(client, cfg, [str(chunk_id) for chunk_id in chunk_ids], docs)
 
 
 def _expand_docs(doc: DocMeta | list[DocMeta], count: int) -> list[DocMeta]:
@@ -203,7 +268,7 @@ def _expand_docs(doc: DocMeta | list[DocMeta], count: int) -> list[DocMeta]:
 
 def store_chunks(
     conn,
-    collection,
+    client,
     cfg: dict,
     *,
     doc_id: str,
@@ -215,26 +280,27 @@ def store_chunks(
     force: bool,
 ) -> str:
     docs = _expand_docs(doc, len(texts))
+    _require_mapped(cfg, docs, source_name)
     existing = load_doc_chunks(conn, doc_id)
     if not force and same_chunks(existing, texts, split_cfg):
         ids = [int(row["id"]) for row in existing]
         meta_same = all(item.same_as(row) for item, row in zip(docs, existing))
-        if not meta_same and chroma_has_ids(collection, ids):
-            _retag(conn, collection, existing, docs)
+        if not meta_same and _vectors_cover(client, cfg, ids, docs):
+            _retag(conn, client, cfg, existing, docs)
             log.info("元信息已更新: %s", source_name)
             return "retagged"
-        if meta_same and chroma_has_ids(collection, ids):
+        if meta_same and _vectors_cover(client, cfg, ids, docs):
             log.info("未改动，跳过: %s（%s 个 chunk）", source_name, len(texts))
             return "skipped"
         if not meta_same:
             update_chunk_metas(conn, ids, docs)
         log.info("原文还在，向量缺失，正在补写: %s", source_name)
-        upsert_existing(conn, collection, existing, cfg, docs)
+        upsert_existing(conn, client, existing, cfg, docs)
         return "repaired"
 
     vectors = embed_texts(get_model(cfg), texts, cfg)
     if existing:
-        delete_doc(conn, collection, doc_id)
+        delete_doc(conn, client, cfg, doc_id)
     chunk_ids = insert_chunks(
         conn,
         source_doc_id=doc_id,
@@ -245,19 +311,16 @@ def store_chunks(
         embed_model_name=cfg["embedding"]["model_name"],
         docs=docs,
     )
-    chroma_upsert(
-        collection,
-        [str(chunk_id) for chunk_id in chunk_ids],
-        vectors,
-        [chroma_meta(chunk_id, source_name, doc_id, item) for chunk_id, item in zip(chunk_ids, docs)],
-    )
+    ids = [str(chunk_id) for chunk_id in chunk_ids]
+    metas = [chroma_meta(doc_id, item) for item in docs]
+    _upsert_groups(client, cfg, ids, vectors, metas, docs)
     head = docs[0]
     who = head.stock_code or head.company or "-"
     log.info("写入 %s：%s 个 chunk [%s/%s %s]", source_name, len(chunk_ids), head.scope, head.doc_type, who)
     return "written"
 
 
-def ingest_file(conn, collection, cfg, docs_dir, path, force: bool) -> str:
+def ingest_file(conn, client, cfg, docs_dir, path, force: bool) -> str:
     text, doc, warning = load_source(docs_dir, path)
     if warning:
         log.warning(warning)
@@ -266,12 +329,12 @@ def ingest_file(conn, collection, cfg, docs_dir, path, force: bool) -> str:
     if not texts:
         log.info("跳过（未抽出文本，扫描件需要 OCR）: %s", path.name)
         if load_doc_chunks(conn, doc_id):
-            delete_doc(conn, collection, doc_id)
+            delete_doc(conn, client, cfg, doc_id)
             return "dropped"
         return "empty"
     return store_chunks(
         conn,
-        collection,
+        client,
         cfg,
         doc_id=doc_id,
         source_name=path.name,
@@ -321,7 +384,7 @@ def ingest_documents(
         log.info("旧索引已删除，将按 %s 重新入库。预切分 JSON 需要再运行 python main.py ingest-split", directory)
         if bm25_path.exists():
             bm25_path.unlink()
-        open_collection(open_chroma(cfg), cfg, reset=True)
+    client = _chroma_client(cfg, reset=reset)
     conn = connect_db(db_path)
     try:
         if not directory.exists():
@@ -329,13 +392,11 @@ def ingest_documents(
         files = iter_source_files(directory)
         if not files:
             raise SystemExit(f"{directory} 里没有 PDF 或 Markdown。")
-
-        client = open_chroma(cfg)
-        collection = open_collection(client, cfg)
         narrowed = directory.resolve() != docs_dir_of(cfg).resolve()
         removed = prune_missing(
             conn,
-            collection,
+            client,
+            cfg,
             live_ids={source_doc_id(id_root, path) for path in files},
             root=cfg["_root"],
             skip_under=split_dir_of(cfg),
@@ -345,7 +406,7 @@ def ingest_documents(
         counts = {"written": 0, "repaired": 0, "retagged": 0, "skipped": 0, "empty": 0, "dropped": 0}
         for path in files:
             try:
-                status = ingest_file(conn, collection, cfg, id_root, path, force)
+                status = ingest_file(conn, client, cfg, id_root, path, force)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -396,14 +457,14 @@ def check_split_documents(split_dir: Path) -> None:
         )
 
 
-def ingest_split_file(conn, collection, cfg, split_dir, path, force: bool, *, id_root: Path) -> str:
+def ingest_split_file(conn, client, cfg, split_dir, path, force: bool, *, id_root: Path) -> str:
     try:
         texts, docs, split_cfg = load_split_file(path)
     except ValueError as exc:
         raise SystemExit(f"{_relative(split_dir, path)}: {exc}") from exc
     return store_chunks(
         conn,
-        collection,
+        client,
         cfg,
         doc_id=source_doc_id(id_root, path),
         source_name=path.name,
@@ -437,7 +498,7 @@ def ingest_split_documents(
         log.info("旧索引已删除，这次只写入 %s。PDF 和 Markdown 需要再运行 python main.py ingest", directory)
         if bm25_path.exists():
             bm25_path.unlink()
-        open_collection(open_chroma(cfg), cfg, reset=True)
+    client = _chroma_client(cfg, reset=reset)
     conn = connect_db(db_path)
     try:
         if not directory.exists():
@@ -445,12 +506,10 @@ def ingest_split_documents(
         files = iter_split_files(directory)
         if not files:
             raise SystemExit(f"{directory} 里没有 JSON。")
-
-        client = open_chroma(cfg)
-        collection = open_collection(client, cfg)
         removed = prune_missing(
             conn,
-            collection,
+            client,
+            cfg,
             live_ids={source_doc_id(id_root, path) for path in files},
             root=cfg["_root"],
             only_under=directory,
@@ -459,7 +518,7 @@ def ingest_split_documents(
         counts = {"written": 0, "repaired": 0, "retagged": 0, "skipped": 0}
         for path in files:
             try:
-                status = ingest_split_file(conn, collection, cfg, directory, path, force, id_root=id_root)
+                status = ingest_split_file(conn, client, cfg, directory, path, force, id_root=id_root)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -502,7 +561,7 @@ def reembed_vectors(cfg: dict, *, force: bool) -> None:
             """
             SELECT id, chunk_text, source_name, source_doc_id, embed_model_name,
                    scope, doc_type, title, company, stock_code, year, period,
-                   published_on, publisher
+                   published_on, author
             FROM chunks
             ORDER BY id
             """
@@ -511,23 +570,40 @@ def reembed_vectors(cfg: dict, *, force: bool) -> None:
             raise SystemExit("sqlite 里没有 chunk，请先运行 python main.py ingest 或 python main.py ingest-split")
 
         target = cfg["embedding"]["model_name"]
+        mapping = collection_map(cfg)
+        unknown = sorted({row["doc_type"] for row in rows} - set(mapping))
+        if unknown:
+            kinds = "、".join(unknown)
+            raise SystemExit(f"这些 doc_type 还没有对应的 Chroma collection：{kinds}")
         client = open_chroma(cfg)
-        collection = open_collection(client, cfg)
+        ensure_collections(client, cfg)
+        groups: dict[str, list] = {}
+        for row in rows:
+            groups.setdefault(row["doc_type"], []).append(row)
         same_model = all(row["embed_model_name"] == target for row in rows)
-        if same_model and collection.count() == len(rows) and not force:
+        aligned = all(
+            open_named_collection(client, name).count() == len(groups.get(doc_type, []))
+            for doc_type, name in mapping.items()
+        )
+        if same_model and aligned and not force:
             log.info("Chroma 已与当前模型 %s 对齐。更换模型，或加上 --force，才会重写向量。", target)
             log.info("BM25 只依赖原文，这次不需要重建。")
             return
 
         log.info("开始重算 %s 个 chunk，模型 %s。BM25 索引保持不变。", len(rows), target)
         vectors = embed_texts(get_model(cfg), [row["chunk_text"] for row in rows], cfg)
-        collection = open_collection(client, cfg, reset=True)
-        chroma_upsert(
-            collection,
-            [str(row["id"]) for row in rows],
-            vectors,
-            [chroma_meta_from_row(row) for row in rows],
-        )
+        by_id = {int(row["id"]): vector for row, vector in zip(rows, vectors)}
+        for doc_type, name in mapping.items():
+            group = groups.get(doc_type, [])
+            collection = open_named_collection(client, name, reset=True)
+            if not group:
+                continue
+            chroma_upsert(
+                collection,
+                [str(row["id"]) for row in group],
+                [by_id[int(row["id"])] for row in group],
+                [chroma_meta_from_row(row) for row in group],
+            )
         conn.execute("UPDATE chunks SET embed_model_name = ?", (target,))
         conn.commit()
         log.info("Chroma 已重写，sqlite 中的 embed_model_name 已更新为 %s", target)

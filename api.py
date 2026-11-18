@@ -94,7 +94,7 @@ class Hit(BaseModel):
     year: int
     period: str
     published_on: str
-    publisher: str
+    author: str
 
 
 class RetrieveResponse(BaseModel):

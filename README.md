@@ -95,7 +95,7 @@ stock_code: "600519"
 year: 2025
 period: "2025Q1"
 published_on: "2025-04-02"
-publisher: 中信证券
+author: 中信证券
 title: 贵州茅台2025年一季报点评
 ---
 ```
@@ -186,7 +186,7 @@ $body = @{ question = "2025年毛利率是多少"; stock_code = "600519"; doc_ty
 Invoke-RestMethod http://127.0.0.1:8100/retrieve -Method Post -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-`POST /retrieve` 返回 `mode` 和 `hits`。`POST /query` 还可以带上 `answer`。每条命中带有 `scope`、`doc_type`、`company`、`stock_code`、`year`、`period`、`published_on`、`publisher`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
+`POST /retrieve` 返回 `mode` 和 `hits`。`POST /query` 还可以带上 `answer`。每条命中带有 `scope`、`doc_type`、`company`、`stock_code`、`year`、`period`、`published_on`、`author`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
 
 ## 更换 embedding
 
