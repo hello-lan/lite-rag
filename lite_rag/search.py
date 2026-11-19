@@ -7,6 +7,7 @@ from lite_rag.meta import SearchFilter, public_meta
 from lite_rag.store import (
     chroma_where_fits,
     collection_name,
+    vector_where,
     configured_collection_names,
     connect_db,
     doc_types_for_filter,
@@ -59,14 +60,18 @@ def vector_search(
     client = open_chroma(cfg)
     ensure_collections(client, cfg)
     chosen = filt if filt is not None else SearchFilter()
-    doc_types = doc_types_for_filter(cfg, chosen)
-    if not chroma_where_fits(doc_types, chosen):
+    doc_types = [
+        doc_type
+        for doc_type in doc_types_for_filter(cfg, chosen)
+        if chroma_where_fits([doc_type], chosen)
+    ]
+    if not doc_types:
         return []
-    counts: list[tuple[object, int]] = []
+    counts: list[tuple[str, object, int]] = []
     for doc_type in doc_types:
         collection = open_named_collection(client, collection_name(cfg, doc_type))
-        counts.append((collection, collection.count()))
-    if all(total <= 0 for _collection, total in counts):
+        counts.append((doc_type, collection, collection.count()))
+    if all(total <= 0 for _doc_type, _collection, total in counts):
         selected = {collection_name(cfg, doc_type) for doc_type in doc_types}
         others_have_data = any(
             open_named_collection(client, name).count() > 0
@@ -77,18 +82,19 @@ def vector_search(
             raise SystemExit("向量库是空的，请先运行 python main.py ingest")
         return []
 
-    searchable: list[tuple[object, int]] = []
-    for collection, total in counts:
+    searchable: list[tuple[object, int, dict | None]] = []
+    for doc_type, collection, total in counts:
         if total <= 0:
             continue
-        if where:
-            matched = collection.get(where=where, include=[])
+        typed_where = vector_where(doc_type, where)
+        if typed_where:
+            matched = collection.get(where=typed_where, include=[])
             count = len(matched.get("ids") or [])
             if count <= 0:
                 continue
         else:
             count = total
-        searchable.append((collection, count))
+        searchable.append((collection, count, typed_where))
     if not searchable:
         return []
 
@@ -100,14 +106,14 @@ def vector_search(
             model = None
             release_model()
     best: dict[int, float] = {}
-    for collection, count in searchable:
+    for collection, count, typed_where in searchable:
         query = {
             "query_embeddings": [vector],
             "n_results": min(top_k, count),
             "include": ["distances"],
         }
-        if where:
-            query["where"] = where
+        if typed_where:
+            query["where"] = typed_where
         result = collection.query(**query)
         ids = result.get("ids") or [[]]
         distances = result.get("distances") or [[]]
@@ -141,6 +147,11 @@ def retrieve(
     company: str | None = None,
     stock_code: str | None = None,
     year: int | None = None,
+    period: str | None = None,
+    section: str | None = None,
+    entity: str | None = None,
+    figure: str | None = None,
+    occasion: str | None = None,
 ) -> list[dict]:
     filt = SearchFilter.parse(
         scope=scope,
@@ -148,6 +159,11 @@ def retrieve(
         company=company,
         stock_code=stock_code,
         year=year,
+        period=period,
+        section=section,
+        entity=entity,
+        figure=figure,
+        occasion=occasion,
     )
     mode = cfg["retrieval"]["mode"]
     top_k = int(cfg["retrieval"]["top_k"])

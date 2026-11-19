@@ -8,25 +8,65 @@ from datetime import date, datetime
 from pathlib import PurePosixPath
 
 SCOPES = ("company", "knowledge")
-DOC_TYPES = ("filing", "ir_qa", "survey", "research", "news", "theory", "beginner")
+DOC_TYPES = ("filing", "ir_qa", "survey", "research", "news", "investment_theory", "beginner")
 DOC_TYPE_LABELS = {
     "filing": "定期报告",
     "ir_qa": "互动问答",
     "survey": "投资者调研",
     "research": "研报",
     "news": "新闻",
-    "theory": "投资理论",
+    "investment_theory": "投资理论",
     "beginner": "入门答疑",
 }
 TYPES_BY_SCOPE = {
     "company": frozenset({"filing", "ir_qa", "survey", "research", "news"}),
-    "knowledge": frozenset({"theory", "beginner"}),
+    "knowledge": frozenset({"investment_theory", "beginner"}),
+}
+FIGURES = ("唐朝", "buffett", "munger")
+FIGURE_LABELS = {
+    "唐朝": "唐朝",
+    "buffett": "巴菲特",
+    "munger": "芒格",
+}
+OCCASIONS = ("letter", "meeting", "speech", "article")
+OCCASION_LABELS = {
+    "letter": "致投资者的信",
+    "meeting": "股东大会",
+    "speech": "演讲",
+    "article": "文章",
 }
 # 采集脚本当前的默认目录，和 company/ir_qa 一样记成互动问答。
 _ROOT_ALIASES = {
     "sse": ("company", "ir_qa"),
     "irm": ("company", "ir_qa"),
 }
+SECTIONS = (
+    "profile",
+    "segment",
+    "mda",
+    "risk",
+    "material",
+    "governance",
+    "financials",
+    "notes",
+)
+SECTION_LABELS = {
+    "profile": "公司与业务",
+    "segment": "分产品分地区",
+    "mda": "经营讨论",
+    "risk": "风险因素",
+    "material": "重要事项",
+    "governance": "股东与治理",
+    "financials": "财务报表",
+    "notes": "附注",
+}
+ENTITIES = ("consolidated", "parent")
+ENTITY_LABELS = {
+    "consolidated": "合并",
+    "parent": "母公司",
+}
+# 只有财务报表和附注会分成合并、母公司两套。
+_ENTITY_SECTIONS = frozenset({"financials", "notes"})
 _FRONT_KEYS = frozenset({
     "scope",
     "doc_type",
@@ -37,6 +77,10 @@ _FRONT_KEYS = frozenset({
     "period",
     "published_on",
     "author",
+    "section",
+    "entity",
+    "figure",
+    "occasion",
 })
 _CODE_NAME = re.compile(r"^(?P<code>\d{6})[_-](?P<company>[^_\-]+)")
 _PERIOD_IN_NAME = re.compile(r"(20\d{2})\s*(Q[1-4]|H[12])", re.IGNORECASE)
@@ -57,6 +101,10 @@ class DocMeta:
     period: str
     published_on: str
     author: str
+    section: str = ""
+    entity: str = ""
+    figure: str = ""
+    occasion: str = ""
 
     def chroma(self) -> dict:
         return {
@@ -69,6 +117,10 @@ class DocMeta:
             "period": self.period,
             "published_on": self.published_on,
             "author": self.author,
+            "section": self.section,
+            "entity": self.entity,
+            "figure": self.figure,
+            "occasion": self.occasion,
         }
 
     def same_as(self, row) -> bool:
@@ -82,6 +134,10 @@ class DocMeta:
             and (row["period"] or "") == self.period
             and (row["published_on"] or "") == self.published_on
             and (row["author"] or "") == self.author
+            and _row_text(row, "section") == self.section
+            and _row_text(row, "entity") == self.entity
+            and _row_text(row, "figure") == self.figure
+            and _row_text(row, "occasion") == self.occasion
         )
 
 
@@ -100,6 +156,10 @@ def doc_from_row(row) -> DocMeta:
         period=row["period"] or "",
         published_on=row["published_on"] or "",
         author=row["author"] or "",
+        section=_row_text(row, "section"),
+        entity=_row_text(row, "entity"),
+        figure=_row_text(row, "figure"),
+        occasion=_row_text(row, "occasion"),
     )
 
 
@@ -119,6 +179,10 @@ def _blank_values() -> dict:
         "period": "",
         "published_on": "",
         "author": "",
+        "section": "",
+        "entity": "",
+        "figure": "",
+        "occasion": "",
     }
 
 
@@ -133,6 +197,10 @@ def _copy_values(doc: DocMeta) -> dict:
         "period": doc.period,
         "published_on": doc.published_on,
         "author": doc.author,
+        "section": doc.section,
+        "entity": doc.entity,
+        "figure": doc.figure,
+        "occasion": doc.occasion,
     }
 
 
@@ -150,6 +218,8 @@ def doc_meta_from_fields(fields: dict, *, base: DocMeta | None = None, title_def
     if base is None and not values["title"]:
         values["title"] = title_default
     _align_year_and_period(values)
+    _check_section_entity(values)
+    _check_figure_occasion(values)
     return DocMeta(**values)
 
 
@@ -167,6 +237,10 @@ def build_doc_meta(relative: str, stem: str, front: dict | None = None) -> tuple
         "period": parsed.get("period", ""),
         "published_on": parsed.get("published_on", ""),
         "author": "",
+        "section": "",
+        "entity": "",
+        "figure": "",
+        "occasion": "",
     }
     provided = set(front or {})
     if front:
@@ -179,6 +253,8 @@ def build_doc_meta(relative: str, stem: str, front: dict | None = None) -> tuple
     if not values["title"]:
         values["title"] = stem
     _align_year_and_period(values)
+    _check_section_entity(values)
+    _check_figure_occasion(values)
     doc = DocMeta(**values)
     warning = None
     if explicit and (doc.scope != scope or doc.doc_type != doc_type):
@@ -198,12 +274,15 @@ def source_label(hit: dict) -> str:
         period = str(int(hit["year"]))
     published = (hit.get("published_on") or "").strip()
     author = (hit.get("author") or "").strip()
+    figure = FIGURE_LABELS.get((hit.get("figure") or "").strip(), "")
+    occasion = OCCASION_LABELS.get((hit.get("occasion") or "").strip(), "")
+    section = SECTION_LABELS.get((hit.get("section") or "").strip(), "")
     title = (hit.get("title") or hit.get("source_name") or "").strip()
     if company and code:
         who = f"{company}（{code}）"
     else:
         who = company or code
-    bits = [bit for bit in (who, kind, period or published, author, title) if bit]
+    bits = [bit for bit in (who, kind, period or published, section, figure or author, occasion, title) if bit]
     return " · ".join(bits)
 
 
@@ -214,13 +293,44 @@ class SearchFilter:
     company: str = ""
     stock_code: str = ""
     year: int = 0
+    period: str = ""
+    section: str = ""
+    entity: str = ""
+    figure: str = ""
+    occasion: str = ""
 
     def active(self) -> bool:
-        return bool(self.scope or self.doc_type or self.company or self.stock_code or self.year)
+        return bool(
+            self.scope
+            or self.doc_type
+            or self.company
+            or self.stock_code
+            or self.year
+            or self.period
+            or self.section
+            or self.entity
+            or self.figure
+            or self.occasion
+        )
 
     def describe(self) -> str:
         kind = DOC_TYPE_LABELS.get(self.doc_type, self.doc_type)
-        parts = [self.scope, kind, self.company, self.stock_code, str(self.year) if self.year else ""]
+        section = SECTION_LABELS.get(self.section, self.section)
+        entity = ENTITY_LABELS.get(self.entity, self.entity)
+        figure = FIGURE_LABELS.get(self.figure, self.figure)
+        occasion = OCCASION_LABELS.get(self.occasion, self.occasion)
+        parts = [
+            self.scope,
+            kind,
+            figure,
+            occasion,
+            self.company,
+            self.stock_code,
+            self.period,
+            section,
+            entity,
+            str(self.year) if self.year else "",
+        ]
         return " ".join(part for part in parts if part)
 
     def sql(self) -> tuple[str, list]:
@@ -241,17 +351,44 @@ class SearchFilter:
         if self.year:
             clauses.append("year = ?")
             params.append(self.year)
+        if self.period:
+            clauses.append("period = ?")
+            params.append(self.period)
+        if self.section:
+            clauses.append("section = ?")
+            params.append(self.section)
+        if self.entity:
+            clauses.append("entity = ?")
+            params.append(self.entity)
+        if self.figure:
+            clauses.append("figure = ?")
+            params.append(self.figure)
+        if self.occasion:
+            clauses.append("occasion = ?")
+            params.append(self.occasion)
         return " AND ".join(clauses), params
 
     def chroma_where(self) -> dict | None:
-        """只包含向量 metadata 上的筛选。scope 和 doc_type 用来选择 collection。"""
+        """只包含向量 metadata 上的筛选。scope 用来选择 collection。"""
         parts = []
+        if self.doc_type == "investment_theory":
+            parts.append({"doc_type": self.doc_type})
+        if self.figure:
+            parts.append({"figure": self.figure})
+        if self.occasion:
+            parts.append({"occasion": self.occasion})
         if self.company:
             parts.append({"company": self.company})
         if self.stock_code:
             parts.append({"stock_code": self.stock_code})
         if self.year:
             parts.append({"year": self.year})
+        if self.period:
+            parts.append({"period": self.period})
+        if self.section:
+            parts.append({"section": self.section})
+        if self.entity:
+            parts.append({"entity": self.entity})
         if not parts:
             return None
         if len(parts) == 1:
@@ -267,6 +404,11 @@ class SearchFilter:
         company: str | None = None,
         stock_code: str | None = None,
         year: int | None = None,
+        period: str | None = None,
+        section: str | None = None,
+        entity: str | None = None,
+        figure: str | None = None,
+        occasion: str | None = None,
     ) -> SearchFilter:
         scope_text = (scope or "").strip()
         type_text = (doc_type or "").strip()
@@ -281,16 +423,33 @@ class SearchFilter:
         try:
             code = _code(stock_code) if stock_code not in (None, "") else ""
             number = _year(year) if year not in (None, "") else 0
+            period_text = "" if period in (None, "") else _period(period)
+            section_text = "" if section in (None, "") else _section(section)
+            entity_text = "" if entity in (None, "") else _entity(entity)
+            figure_text = "" if figure in (None, "") else _figure(figure)
+            occasion_text = "" if occasion in (None, "") else _occasion(occasion)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         if year not in (None, "") and number == 0:
             raise SystemExit("year 需要是 1900 到 2100 之间的年份")
+        if number and _query_includes_filing(scope_text, type_text):
+            raise SystemExit("查财报请用 period，不要用 year")
+        in_theory = type_text == "investment_theory" or (
+            scope_text == "knowledge" and type_text in ("", "investment_theory")
+        )
+        if (figure_text or occasion_text) and not in_theory:
+            raise SystemExit("figure 和 occasion 只用于 investment_theory")
         return cls(
             scope=scope_text,
             doc_type=type_text,
             company=company_text,
             stock_code=code,
             year=number,
+            period=period_text,
+            section=section_text,
+            entity=entity_text,
+            figure=figure_text,
+            occasion=occasion_text,
         )
 
 
@@ -305,7 +464,7 @@ def _classify_folder(relative: str) -> tuple[str, str, bool]:
         return "company", "filing", False
     if len(parts) < 3:
         raise ValueError(
-            f"{relative} 需要放在类型子目录下，例如 company/filing/ 或 knowledge/theory/"
+            f"{relative} 需要放在类型子目录下，例如 company/filing/ 或 knowledge/investment_theory/"
         )
     kind = parts[1]
     allowed = TYPES_BY_SCOPE[parts[0]]
@@ -387,6 +546,14 @@ def _apply_front(values: dict, front: dict) -> None:
         values["published_on"] = _date(front["published_on"])
     if "author" in front:
         values["author"] = "" if front["author"] is None else str(front["author"]).strip()
+    if "section" in front:
+        values["section"] = "" if front["section"] in (None, "") else _section(front["section"])
+    if "entity" in front:
+        values["entity"] = "" if front["entity"] in (None, "") else _entity(front["entity"])
+    if "figure" in front:
+        values["figure"] = "" if front["figure"] in (None, "") else _figure(front["figure"])
+    if "occasion" in front:
+        values["occasion"] = "" if front["occasion"] in (None, "") else _occasion(front["occasion"])
 
 
 def _align_year_and_period(values: dict) -> None:
@@ -399,6 +566,72 @@ def _align_year_and_period(values: dict) -> None:
     if year and year != period_year:
         raise ValueError(f"year={year} 与 period={period} 不是同一年")
     values["year"] = year or period_year
+
+
+def _row_text(row, key: str) -> str:
+    if key not in row.keys():
+        return ""
+    return row[key] or ""
+
+
+def _query_includes_filing(scope: str, doc_type: str) -> bool:
+    """未指定类型时，公司范围和未限定范围都会查到财报。"""
+    if doc_type == "filing":
+        return True
+    if doc_type:
+        return False
+    return scope != "knowledge"
+
+
+def _check_section_entity(values: dict) -> None:
+    if values["entity"] and values["section"] not in _ENTITY_SECTIONS:
+        raise ValueError("entity 只用于 section 为 financials 或 notes")
+
+
+def _check_figure_occasion(values: dict) -> None:
+    figure = values["figure"]
+    occasion = values["occasion"]
+    if values["doc_type"] == "investment_theory":
+        if values["author"]:
+            raise ValueError("investment_theory 用 figure 表示人物，不要写 author")
+        if not figure:
+            raise ValueError("investment_theory 需要 figure")
+        if not occasion:
+            raise ValueError("investment_theory 需要 occasion")
+        return
+    if figure or occasion:
+        raise ValueError("figure 和 occasion 只用于 investment_theory")
+
+
+def _figure(value) -> str:
+    text = str(value).strip()
+    if text not in FIGURE_LABELS:
+        names = "、".join(FIGURES)
+        raise ValueError(f"figure 只能是 {names}")
+    return text
+
+
+def _occasion(value) -> str:
+    text = str(value).strip()
+    if text not in OCCASION_LABELS:
+        names = "、".join(OCCASIONS)
+        raise ValueError(f"occasion 只能是 {names}")
+    return text
+
+
+def _section(value) -> str:
+    text = str(value).strip()
+    if text not in SECTION_LABELS:
+        names = "、".join(SECTIONS)
+        raise ValueError(f"section 只能是 {names}")
+    return text
+
+
+def _entity(value) -> str:
+    text = str(value).strip()
+    if text not in ENTITY_LABELS:
+        raise ValueError("entity 只能是 consolidated 或 parent")
+    return text
 
 
 def _scope_for(doc_type: str) -> str:

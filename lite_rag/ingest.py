@@ -258,6 +258,34 @@ def _retag(conn, client, cfg: dict, rows, docs: list[DocMeta]) -> None:
     _drop_foreign_ids(client, cfg, [str(chunk_id) for chunk_id in chunk_ids], docs)
 
 
+def _same_chroma_meta(stored: dict, expected: dict) -> bool:
+    if set(stored) != set(expected):
+        return False
+    return all(stored.get(key) == value for key, value in expected.items())
+
+
+def _chroma_meta_matches(client, cfg: dict, rows, docs: list[DocMeta]) -> bool:
+    """向量上的元信息是否已经和当前文档一致。收紧字段后，原文没变也要补写。"""
+    grouped: dict[str, list[tuple[str, dict]]] = {}
+    for row, doc in zip(rows, docs):
+        grouped.setdefault(doc.doc_type, []).append(
+            (str(row["id"]), chroma_meta(row["source_doc_id"], doc))
+        )
+    for doc_type, pairs in grouped.items():
+        collection = open_named_collection(client, collection_name(cfg, doc_type))
+        expected = {chunk_id: meta for chunk_id, meta in pairs}
+        got = collection.get(ids=list(expected), include=["metadatas"])
+        found = list(got.get("ids") or [])
+        metadatas = list(got.get("metadatas") or [])
+        stored_by_id = {chunk_id: meta or {} for chunk_id, meta in zip(found, metadatas)}
+        if set(stored_by_id) != set(expected):
+            return False
+        for chunk_id, meta in expected.items():
+            if not _same_chroma_meta(stored_by_id[chunk_id], meta):
+                return False
+    return True
+
+
 def _expand_docs(doc: DocMeta | list[DocMeta], count: int) -> list[DocMeta]:
     if isinstance(doc, DocMeta):
         return [doc] * count
@@ -290,6 +318,10 @@ def store_chunks(
             log.info("元信息已更新: %s", source_name)
             return "retagged"
         if meta_same and _vectors_cover(client, cfg, ids, docs):
+            if not _chroma_meta_matches(client, cfg, existing, docs):
+                _retag(conn, client, cfg, existing, docs)
+                log.info("元信息已更新: %s", source_name)
+                return "retagged"
             log.info("未改动，跳过: %s（%s 个 chunk）", source_name, len(texts))
             return "skipped"
         if not meta_same:
@@ -561,7 +593,7 @@ def reembed_vectors(cfg: dict, *, force: bool) -> None:
             """
             SELECT id, chunk_text, source_name, source_doc_id, embed_model_name,
                    scope, doc_type, title, company, stock_code, year, period,
-                   published_on, author
+                   published_on, author, section, entity, figure, occasion
             FROM chunks
             ORDER BY id
             """

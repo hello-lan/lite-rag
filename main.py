@@ -9,7 +9,16 @@ import click
 from lite_rag.answer import generate_answer
 from lite_rag.config import configure_stdio, load_config
 from lite_rag.ingest import ingest_documents, ingest_split_documents, reembed_vectors
-from lite_rag.meta import DOC_TYPES, SCOPES, SearchFilter, source_label
+from lite_rag.meta import (
+    DOC_TYPES,
+    ENTITIES,
+    FIGURES,
+    OCCASIONS,
+    SCOPES,
+    SECTIONS,
+    SearchFilter,
+    source_label,
+)
 from lite_rag.search import retrieve
 
 
@@ -82,10 +91,15 @@ def ingest_split(force: bool, check: bool, split_dir: Path | None) -> None:
     help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印。不传则按 llm.enabled 选择 hits 或 both",
 )
 @click.option("--scope", type=click.Choice(list(SCOPES)), required=True, help="查询范围：company 公司材料，knowledge 投资通识")
-@click.option("--doc-type", type=click.Choice(list(DOC_TYPES)), help="材料类型：filing、ir_qa、survey、research、news、theory、beginner")
+@click.option("--doc-type", type=click.Choice(list(DOC_TYPES)), help="材料类型：filing、ir_qa、survey、research、news、investment_theory、beginner")
+@click.option("--figure", type=click.Choice(list(FIGURES)), default=None, help="投资理论的主要人物：唐朝，buffett 巴菲特，munger 芒格")
+@click.option("--occasion", type=click.Choice(list(OCCASIONS)), default=None, help="投资理论的场合：letter 致投资者的信，meeting 股东大会，speech 演讲，article 文章")
 @click.option("--company", default=None, help="公司简称，精确匹配")
 @click.option("--code", "stock_code", default=None, help="6 位股票代码")
-@click.option("--year", type=click.IntRange(1900, 2100), help="报告期或发布年份")
+@click.option("--year", type=click.IntRange(1900, 2100), help="投资通识的年份。查询范围包含财报时请改用 --period")
+@click.option("--period", default=None, help="财报报告期，如 2024、2024Q1、2024H1。累计口径")
+@click.option("--section", type=click.Choice(list(SECTIONS)), default=None, help="财报章节：profile、segment、mda、risk、material、governance、financials、notes")
+@click.option("--entity", type=click.Choice(list(ENTITIES)), default=None, help="报表口径：consolidated 合并，parent 母公司。只用于财务报表和附注")
 def query(
     question: tuple[str, ...],
     mode: str | None,
@@ -96,6 +110,11 @@ def query(
     company: str | None,
     stock_code: str | None,
     year: int | None,
+    period: str | None,
+    section: str | None,
+    entity: str | None,
+    figure: str | None,
+    occasion: str | None,
 ) -> None:
     cfg = load_config()
     if mode:
@@ -112,6 +131,11 @@ def query(
         company=company,
         stock_code=stock_code,
         year=year,
+        period=period,
+        section=section,
+        entity=entity,
+        figure=figure,
+        occasion=occasion,
     )
     hits = retrieve(
         cfg,
@@ -121,6 +145,11 @@ def query(
         company=filt.company or None,
         stock_code=filt.stock_code or None,
         year=filt.year or None,
+        period=filt.period or None,
+        section=filt.section or None,
+        entity=filt.entity or None,
+        figure=filt.figure or None,
+        occasion=filt.occasion or None,
     )
     if output is None:
         output = "both" if cfg["llm"].get("enabled") else "hits"

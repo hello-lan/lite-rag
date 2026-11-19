@@ -1,4 +1,4 @@
-"""财报 RAG 查询接口。"""
+"""财报 RAG 查询接口。knowledge 与 financial_report 分路径，请求字段不混用。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_serializer
 
 from lite_rag.answer import generate_answer
 from lite_rag.config import configure_stdio, load_config, log, resolve_path
@@ -22,8 +22,13 @@ from lite_rag.search import retrieve
 from lite_rag.store import get_model, keep_model_loaded, model_is_loaded, release_model
 
 Mode = Literal["hybrid", "bm25", "vector"]
-Scope = Literal["company", "knowledge"]
-DocType = Literal["filing", "ir_qa", "survey", "research", "news", "theory", "beginner"]
+Output = Literal["hits", "answer", "both"]
+Collection = Literal["knowledge", "financial_report"]
+TheoryType = Literal["investment_theory"]
+Figure = Literal["唐朝", "buffett", "munger"]
+Occasion = Literal["letter", "meeting", "speech", "article"]
+Section = Literal["profile", "segment", "mda", "risk", "material", "governance", "financials", "notes"]
+Entity = Literal["consolidated", "parent"]
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -33,26 +38,57 @@ class UTF8JSONResponse(JSONResponse):
         return json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-class RetrieveRequest(BaseModel):
-    """检索请求。未传的可选项继续使用 config.yaml。"""
+class _RequestBase(BaseModel):
+    """检索请求的公共字段。未传的可选项继续使用 config.yaml。"""
 
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(description="要查询的问题")
     mode: Mode | None = Field(default=None, description="检索模式。不传则使用 retrieval.mode")
     top_k: StrictInt | None = Field(default=None, ge=1, description="返回的 chunk 数。不传则使用 retrieval.top_k")
-    scope: Scope | None = Field(default=None, description="company 只查公司材料，knowledge 只查投资通识")
-    doc_type: DocType | None = Field(
+
+    @field_validator("question")
+    @classmethod
+    def question_not_blank(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("不能为空")
+        return text
+
+
+class KnowledgeRetrieveRequest(_RequestBase):
+    """POST /knowledge/retrieve。只查投资通识，可按大类、人物、场合和年份筛选。"""
+
+    doc_type: TheoryType | None = Field(default=None, description="大类。目前只有 investment_theory。不传则不限大类")
+    figure: Figure | None = Field(
         default=None,
-        description="filing 定期报告，ir_qa 互动问答，survey 调研，research 研报，news 新闻，theory 投资理论，beginner 入门答疑",
+        description="主要人物：唐朝，buffett 巴菲特，munger 芒格。不传则不限人物",
     )
+    occasion: Occasion | None = Field(
+        default=None,
+        description="场合：letter 致投资者的信，meeting 股东大会，speech 演讲，article 文章。不传则不限场合",
+    )
+    year: StrictInt | None = Field(default=None, ge=1900, le=2100, description="年份。不传则不限年份")
+
+
+class FilingRetrieveRequest(_RequestBase):
+    """POST /financial_report/retrieve。只查定期报告，可按公司、代码、报告期、章节和口径筛选。"""
+
     company: str | None = Field(default=None, description="公司简称，精确匹配")
     stock_code: str | None = Field(default=None, description="6 位股票代码")
-    year: StrictInt | None = Field(default=None, ge=1900, le=2100, description="报告期或发布年份")
+    period: str | None = Field(default=None, description="报告期，如 2024、2024Q1、2024H1。累计口径")
+    section: Section | None = Field(
+        default=None,
+        description="章节：profile、segment、mda、risk、material、governance、financials、notes",
+    )
+    entity: Entity | None = Field(
+        default=None,
+        description="报表口径：consolidated 合并，parent 母公司。只用于财务报表和附注",
+    )
 
-    @field_validator("question", "company")
+    @field_validator("company", "period")
     @classmethod
-    def text_not_blank(cls, value: str | None) -> str | None:
+    def optional_text_not_blank(cls, value: str | None) -> str | None:
         if value is None:
             return None
         text = value.strip()
@@ -71,10 +107,26 @@ class RetrieveRequest(BaseModel):
         return text
 
 
-class QueryRequest(RetrieveRequest):
-    """POST /query 的请求体。未传的可选项继续使用 config.yaml。"""
+class KnowledgeQueryRequest(KnowledgeRetrieveRequest):
+    """POST /knowledge/query。"""
 
-    answer: StrictBool | None = Field(default=None, description="是否调用大模型。不传则跟随 llm.enabled")
+    output: Output | None = Field(
+        default=None,
+        description="hits 只返回命中，answer 只返回回答，both 两者都返回。不传则看 llm.enabled",
+    )
+
+
+class FilingQueryRequest(FilingRetrieveRequest):
+    """POST /financial_report/query。"""
+
+    output: Output | None = Field(
+        default=None,
+        description="hits 只返回命中，answer 只返回回答，both 两者都返回。不传则看 llm.enabled",
+    )
+
+
+RetrieveBody = KnowledgeRetrieveRequest | FilingRetrieveRequest
+QueryBody = KnowledgeQueryRequest | FilingQueryRequest
 
 
 class Hit(BaseModel):
@@ -95,16 +147,35 @@ class Hit(BaseModel):
     period: str
     published_on: str
     author: str
+    section: str = ""
+    entity: str = ""
+    figure: str = ""
+    occasion: str = ""
 
 
 class RetrieveResponse(BaseModel):
     question: str
+    collection: Collection
     mode: Mode
     hits: list[Hit]
 
 
-class QueryResponse(RetrieveResponse):
+class QueryResponse(BaseModel):
+    question: str
+    collection: Collection
+    mode: Mode
+    output: Output
+    hits: list[Hit] | None = None
     answer: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unused(self, handler):
+        data = handler(self)
+        if self.hits is None:
+            data.pop("hits", None)
+        if self.answer is None:
+            data.pop("answer", None)
+        return data
 
 
 def _exit_message(exc: SystemExit) -> str:
@@ -138,7 +209,7 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
     async def http_error(_request: Request, exc: HTTPException) -> JSONResponse:
         return UTF8JSONResponse(status_code=exc.status_code, content={"detail": jsonable_encoder(exc.detail)})
 
-    def _prepare(body: RetrieveRequest) -> dict:
+    def _prepare(body: RetrieveBody) -> dict:
         cfg = copy.deepcopy(base_cfg)
         if body.mode is not None:
             cfg["retrieval"]["mode"] = body.mode
@@ -146,19 +217,75 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
             cfg["retrieval"]["top_k"] = body.top_k
         return cfg
 
-    def _retrieve_hits(cfg: dict, body: RetrieveRequest) -> list[dict]:
+    def _retrieve_hits(cfg: dict, body: RetrieveBody) -> list[dict]:
+        if isinstance(body, KnowledgeRetrieveRequest):
+            filters = {
+                "scope": "knowledge",
+                "doc_type": body.doc_type,
+                "figure": body.figure,
+                "occasion": body.occasion,
+                "year": body.year,
+            }
+        else:
+            filters = {
+                "scope": "company",
+                "doc_type": "filing",
+                "company": body.company,
+                "stock_code": body.stock_code,
+                "period": body.period,
+                "section": body.section,
+                "entity": body.entity,
+            }
         try:
-            return retrieve(
-                cfg,
-                body.question,
-                scope=body.scope,
-                doc_type=body.doc_type,
-                company=body.company,
-                stock_code=body.stock_code,
-                year=body.year,
-            )
+            return retrieve(cfg, body.question, **filters)
         except SystemExit as exc:
             raise HTTPException(status_code=400, detail=_exit_message(exc)) from exc
+
+    def _chosen_output(body: QueryBody, cfg: dict) -> Output:
+        if body.output is not None:
+            return body.output
+        return "both" if cfg["llm"].get("enabled") else "hits"
+
+    def _retrieve_response(body: RetrieveBody, collection: Collection) -> RetrieveResponse:
+        cfg = _prepare(body)
+        with query_lock:
+            hits = _retrieve_hits(cfg, body)
+        return RetrieveResponse(
+            question=body.question,
+            collection=collection,
+            mode=cfg["retrieval"]["mode"],
+            hits=hits,
+        )
+
+    def _query_response(body: QueryBody, collection: Collection) -> QueryResponse | JSONResponse:
+        cfg = _prepare(body)
+        chosen = _chosen_output(body, cfg)
+        with query_lock:
+            hits = _retrieve_hits(cfg, body)
+            answer = None
+            if chosen in ("answer", "both"):
+                try:
+                    answer = generate_answer(cfg, body.question, hits)
+                except SystemExit as exc:
+                    return UTF8JSONResponse(
+                        status_code=502,
+                        content={
+                            "detail": _exit_message(exc),
+                            "collection": collection,
+                            "mode": cfg["retrieval"]["mode"],
+                            "output": chosen,
+                            "hits": hits,
+                        },
+                    )
+
+        return QueryResponse(
+            question=body.question,
+            collection=collection,
+            mode=cfg["retrieval"]["mode"],
+            output=chosen,
+            hits=None if chosen == "answer" else hits,
+            answer=answer if chosen in ("answer", "both") else None,
+        )
 
     @app.get("/health")
     def health() -> dict:
@@ -170,35 +297,21 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
             "model_loaded": model_is_loaded(),
         }
 
-    @app.post("/retrieve", response_model=RetrieveResponse)
-    def retrieve_only(body: RetrieveRequest) -> RetrieveResponse:
-        cfg = _prepare(body)
-        with query_lock:
-            hits = _retrieve_hits(cfg, body)
-        return RetrieveResponse(question=body.question, mode=cfg["retrieval"]["mode"], hits=hits)
+    @app.post("/knowledge/retrieve", response_model=RetrieveResponse)
+    def retrieve_knowledge(body: KnowledgeRetrieveRequest) -> RetrieveResponse:
+        return _retrieve_response(body, "knowledge")
 
-    @app.post("/query", response_model=QueryResponse)
-    def query(body: QueryRequest) -> QueryResponse:
-        cfg = _prepare(body)
-        want_answer = body.answer if body.answer is not None else bool(cfg["llm"].get("enabled"))
-        with query_lock:
-            hits = _retrieve_hits(cfg, body)
+    @app.post("/knowledge/query", response_model=QueryResponse)
+    def query_knowledge(body: KnowledgeQueryRequest) -> QueryResponse | JSONResponse:
+        return _query_response(body, "knowledge")
 
-            answer = None
-            if want_answer:
-                try:
-                    answer = generate_answer(cfg, body.question, hits)
-                except SystemExit as exc:
-                    return UTF8JSONResponse(
-                        status_code=502,
-                        content={
-                            "detail": _exit_message(exc),
-                            "mode": cfg["retrieval"]["mode"],
-                            "hits": hits,
-                        },
-                    )
+    @app.post("/financial_report/retrieve", response_model=RetrieveResponse)
+    def retrieve_financial_report(body: FilingRetrieveRequest) -> RetrieveResponse:
+        return _retrieve_response(body, "financial_report")
 
-        return QueryResponse(question=body.question, mode=cfg["retrieval"]["mode"], hits=hits, answer=answer)
+    @app.post("/financial_report/query", response_model=QueryResponse)
+    def query_financial_report(body: FilingQueryRequest) -> QueryResponse | JSONResponse:
+        return _query_response(body, "financial_report")
 
     return app
 
