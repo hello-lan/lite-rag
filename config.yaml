@@ -1,9 +1,11 @@
 # 财报 RAG 本地配置。改切分或 embedding 后，用对应脚本重跑，不必改代码。
 
 split:
-  version: "v1"
+  version: "v2"
   chunk_size: 1000
   chunk_overlap: 200
+  # 滑窗时把 Markdown 表当特殊块：整表保留或按行切并重复表头
+  table_aware: true
   # 中文财报按句号、分号再切开，避免把一整段指标切碎
   separators:
     - "\n\n"
@@ -41,13 +43,15 @@ retrieval:
   rrf_k: 60
 
 paths:
-  # PDF、Markdown 放在 corpus/02_processed，已切分的 JSON 放在 corpus/03_splited
-  docs_dir: corpus/02_processed
+  # 入库只读已切分 JSON（默认 corpus/03_splited）
   split_dir: corpus/03_splited
   # 入库生成的 sqlite、BM25 和 Chroma 都放在 data/
   chroma_dir: data/chroma
   meta_db: data/meta.db
-  bm25_index: data/bm25_index.pkl
+  # financial_report / knowledge 分表，BM25 也按 scope 分开（表内 id 独立自增）
+  bm25_index:
+    financial_report: data/financial_report_bm25.pkl
+    knowledge: data/knowledge_bm25.pkl
   # doc_type 对应的 Chroma collection。未列出的类型不写入向量。
   collections:
     investment_theory: knowledge

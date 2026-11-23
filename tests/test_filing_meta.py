@@ -6,14 +6,14 @@ import unittest
 from pathlib import Path
 
 from lite_rag.meta import SearchFilter, doc_meta_from_fields
-from lite_rag.store import chroma_meta, init_meta_db
+from lite_rag.store import CHUNK_TABLES, chroma_meta, init_meta_db, required_columns
 
 
 def filing(**extra):
     fields = {
-        "scope": "company",
+        "scope": "financial_report",
         "doc_type": "filing",
-        "company": "贵州茅台",
+        "stock_name": "贵州茅台",
         "stock_code": "600519",
         "year": 2024,
         "period": "2024",
@@ -29,7 +29,7 @@ class FilingMetaTests(unittest.TestCase):
         self.assertEqual(meta["period"], "2024")
         self.assertEqual(meta["section"], "financials")
         self.assertEqual(meta["entity"], "consolidated")
-        self.assertEqual(meta["company"], "贵州茅台")
+        self.assertEqual(meta["stock_name"], "贵州茅台")
         self.assertNotIn("year", meta)
 
     def test_empty_section_and_entity_are_omitted(self) -> None:
@@ -54,7 +54,6 @@ class FilingMetaTests(unittest.TestCase):
         self.assertEqual(meta["figure"], "唐朝")
         self.assertEqual(meta["occasion"], "article")
         self.assertEqual(meta["year"], 2018)
-        self.assertNotIn("author", meta)
         self.assertNotIn("period", meta)
         self.assertNotIn("section", meta)
 
@@ -67,8 +66,7 @@ class FilingMetaTests(unittest.TestCase):
                     "scope": "knowledge",
                     "doc_type": "investment_theory",
                     "figure": "唐朝",
-                    "occasion": "article",
-                    "author": "唐朝",
+                    "year": 2018,
                 }
             )
 
@@ -91,10 +89,10 @@ class FilingMetaTests(unittest.TestCase):
 
     def test_filing_query_rejects_year(self) -> None:
         with self.assertRaises(SystemExit) as caught:
-            SearchFilter.parse(scope="company", doc_type="filing", year=2024)
+            SearchFilter.parse(scope="financial_report", doc_type="filing", year=2024)
         self.assertEqual(caught.exception.code, "查财报请用 period，不要用 year")
         with self.assertRaises(SystemExit):
-            SearchFilter.parse(scope="company", year=2024)
+            SearchFilter.parse(scope="financial_report", year=2024)
         with self.assertRaises(SystemExit):
             SearchFilter.parse(year=2024)
 
@@ -152,12 +150,11 @@ class FilingMetaTests(unittest.TestCase):
                     scope TEXT NOT NULL DEFAULT '',
                     doc_type TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL DEFAULT '',
-                    company TEXT NOT NULL DEFAULT '',
+                    stock_name TEXT NOT NULL DEFAULT '',
                     stock_code TEXT NOT NULL DEFAULT '',
                     year INTEGER NOT NULL DEFAULT 0,
                     period TEXT NOT NULL DEFAULT '',
-                    published_on TEXT NOT NULL DEFAULT '',
-                    author TEXT NOT NULL DEFAULT ''
+                    published_on TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -175,11 +172,26 @@ class FilingMetaTests(unittest.TestCase):
             reset = init_meta_db(path)
             self.assertTrue(reset)
             conn = sqlite3.connect(path)
-            count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(chunks)")}
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            self.assertEqual(set(CHUNK_TABLES.values()), tables & set(CHUNK_TABLES.values()))
+            self.assertNotIn("chunks", tables)
+            for scope, table in CHUNK_TABLES.items():
+                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                self.assertEqual(count, 0)
+                self.assertEqual(columns, required_columns(scope))
+            company_cols = required_columns("financial_report")
+            knowledge_cols = required_columns("knowledge")
+            self.assertTrue({"stock_name", "stock_code", "period", "section", "entity"} <= company_cols)
+            self.assertFalse({"scope", "year", "figure", "occasion"} & company_cols)
+            self.assertTrue({"figure", "occasion", "year"} <= knowledge_cols)
+            self.assertFalse({"scope", "stock_name", "stock_code", "period", "section", "entity"} & knowledge_cols)
             conn.close()
-            self.assertEqual(count, 0)
-            self.assertTrue({"section", "entity", "figure", "occasion"} <= columns)
             self.assertFalse(init_meta_db(path))
 
 

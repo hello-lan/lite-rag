@@ -74,7 +74,7 @@ class KnowledgeRetrieveRequest(_RequestBase):
 class FilingRetrieveRequest(_RequestBase):
     """POST /financial_report/retrieve。只查定期报告，可按公司、代码、报告期、章节和口径筛选。"""
 
-    company: str | None = Field(default=None, description="公司简称，精确匹配")
+    stock_name: str | None = Field(default=None, description="股票简称，精确匹配")
     stock_code: str | None = Field(default=None, description="6 位股票代码")
     period: str | None = Field(default=None, description="报告期，如 2024、2024Q1、2024H1。累计口径")
     section: Section | None = Field(
@@ -86,7 +86,7 @@ class FilingRetrieveRequest(_RequestBase):
         description="报表口径：consolidated 合并，parent 母公司。只用于财务报表和附注",
     )
 
-    @field_validator("company", "period")
+    @field_validator("stock_name", "period")
     @classmethod
     def optional_text_not_blank(cls, value: str | None) -> str | None:
         if value is None:
@@ -141,12 +141,11 @@ class Hit(BaseModel):
     scope: str
     doc_type: str
     title: str
-    company: str
+    stock_name: str
     stock_code: str
     year: int
     period: str
     published_on: str
-    author: str
     section: str = ""
     entity: str = ""
     figure: str = ""
@@ -228,9 +227,9 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
             }
         else:
             filters = {
-                "scope": "company",
+                "scope": "financial_report",
                 "doc_type": "filing",
-                "company": body.company,
+                "stock_name": body.stock_name,
                 "stock_code": body.stock_code,
                 "period": body.period,
                 "section": body.section,

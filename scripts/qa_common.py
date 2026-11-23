@@ -133,8 +133,8 @@ def now_text() -> str:
     return datetime.now(SHANGHAI).strftime("%Y-%m-%d %H:%M")
 
 
-def safe_filename(code: str, company: str) -> str:
-    name = _INVALID_FILENAME.sub("_", company).strip().strip(".")
+def safe_filename(code: str, stock_name: str) -> str:
+    name = _INVALID_FILENAME.sub("_", stock_name).strip().strip(".")
     return f"{code}_{name or '公司'}"
 
 
@@ -145,7 +145,7 @@ def write_outputs(
     render_markdown: Callable[[list[dict]], str],
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = safe_filename(records[0]["stock_code"], records[0]["company"])
+    stem = safe_filename(records[0]["stock_code"], records[0]["stock_name"])
     written: list[Path] = []
     if output_format in {"md", "both"}:
         path = output_dir / f"{stem}.md"

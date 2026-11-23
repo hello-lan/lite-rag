@@ -1,4 +1,4 @@
-"""财报 RAG 命令行：入库、预切分入库、查询、按当前模型重算向量、启动查询接口。"""
+"""财报 RAG 命令行：预切分 JSON 入库、查询、按当前模型重算向量、启动查询接口。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import click
 
 from lite_rag.answer import generate_answer
 from lite_rag.config import configure_stdio, load_config
-from lite_rag.ingest import ingest_documents, ingest_split_documents, reembed_vectors
+from lite_rag.ingest import ingest_split_documents, reembed_vectors
 from lite_rag.meta import (
     DOC_TYPES,
     ENTITIES,
@@ -22,7 +22,7 @@ from lite_rag.meta import (
 from lite_rag.search import retrieve
 
 
-@click.group(help="本地财报 RAG：入库、预切分入库、查询、按新模型重算向量、启动查询接口。")
+@click.group(help="本地财报 RAG：预切分 JSON 入库、查询、按新模型重算向量、启动查询接口。")
 def cli() -> None:
     configure_stdio()
 
@@ -50,25 +50,10 @@ def print_hits(mode: str, hits: list[dict], filt: SearchFilter | None = None) ->
         print()
 
 
-@cli.command(help="把 PDF 和 Markdown 切分后写入财报 RAG 索引。默认读取配置里的 paths.docs_dir。")
-@click.option("--force", is_flag=True, help="忽略未改动的文档，全部重新切分并写入向量")
-@click.option("--check", is_flag=True, help="只解析和切分，不下载模型，也不写数据库")
-@click.option("--bm25-only", is_flag=True, help="不重新解析文档，只按 sqlite 里的原文重建 BM25")
-@click.option(
-    "--dir",
-    "docs_dir",
-    default=None,
-    type=click.Path(file_okay=False, path_type=Path),
-    help="本次读取的文档目录。相对路径相对项目根目录。不传则使用 paths.docs_dir",
-)
-def ingest(force: bool, check: bool, bm25_only: bool, docs_dir: Path | None) -> None:
-    cfg = load_config()
-    ingest_documents(cfg, force=force, check=check, bm25_only=bm25_only, docs_dir=docs_dir)
-
-
-@cli.command("ingest-split", help="把已切分的 JSON 嵌入并写入索引，不再切分。默认读取配置里的 paths.split_dir。")
+@cli.command("ingest-split", help="把已切分的 JSON 嵌入并写入索引。默认读取配置里的 paths.split_dir。")
 @click.option("--force", is_flag=True, help="即使文本和元信息没变，也重新嵌入并写入")
 @click.option("--check", is_flag=True, help="只校验 JSON，不下载模型，也不写数据库")
+@click.option("--bm25-only", is_flag=True, help="不读 JSON，只按 sqlite 里的原文重建 BM25")
 @click.option(
     "--dir",
     "split_dir",
@@ -76,9 +61,11 @@ def ingest(force: bool, check: bool, bm25_only: bool, docs_dir: Path | None) -> 
     type=click.Path(file_okay=False, path_type=Path),
     help="本次读取的 JSON 目录。相对路径相对项目根目录。不传则使用 paths.split_dir",
 )
-def ingest_split(force: bool, check: bool, split_dir: Path | None) -> None:
+def ingest_split(force: bool, check: bool, bm25_only: bool, split_dir: Path | None) -> None:
     cfg = load_config()
-    ingest_split_documents(cfg, force=force, check=check, split_dir=split_dir)
+    ingest_split_documents(
+        cfg, force=force, check=check, bm25_only=bm25_only, split_dir=split_dir
+    )
 
 
 @cli.command(help="按 BM25、向量或 RRF 混合检索财报 chunk，可选调用大模型生成回答。")
@@ -90,11 +77,11 @@ def ingest_split(force: bool, check: bool, split_dir: Path | None) -> None:
     type=click.Choice(["hits", "answer", "both"]),
     help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印。不传则按 llm.enabled 选择 hits 或 both",
 )
-@click.option("--scope", type=click.Choice(list(SCOPES)), required=True, help="查询范围：company 公司材料，knowledge 投资通识")
+@click.option("--scope", type=click.Choice(list(SCOPES)), required=True, help="查询范围：financial_report 公司材料，knowledge 投资通识")
 @click.option("--doc-type", type=click.Choice(list(DOC_TYPES)), help="材料类型：filing、ir_qa、survey、research、news、investment_theory、beginner")
 @click.option("--figure", type=click.Choice(list(FIGURES)), default=None, help="投资理论的主要人物：唐朝，buffett 巴菲特，munger 芒格")
 @click.option("--occasion", type=click.Choice(list(OCCASIONS)), default=None, help="投资理论的场合：letter 致投资者的信，meeting 股东大会，speech 演讲，article 文章")
-@click.option("--company", default=None, help="公司简称，精确匹配")
+@click.option("--stock-name", "stock_name", default=None, help="股票简称，精确匹配")
 @click.option("--code", "stock_code", default=None, help="6 位股票代码")
 @click.option("--year", type=click.IntRange(1900, 2100), help="投资通识的年份。查询范围包含财报时请改用 --period")
 @click.option("--period", default=None, help="财报报告期，如 2024、2024Q1、2024H1。累计口径")
@@ -107,7 +94,7 @@ def query(
     output: str | None,
     scope: str,
     doc_type: str | None,
-    company: str | None,
+    stock_name: str | None,
     stock_code: str | None,
     year: int | None,
     period: str | None,
@@ -128,7 +115,7 @@ def query(
     filt = SearchFilter.parse(
         scope=scope,
         doc_type=doc_type,
-        company=company,
+        stock_name=stock_name,
         stock_code=stock_code,
         year=year,
         period=period,
@@ -142,7 +129,7 @@ def query(
         text,
         scope=filt.scope or None,
         doc_type=filt.doc_type or None,
-        company=filt.company or None,
+        stock_name=filt.stock_name or None,
         stock_code=filt.stock_code or None,
         year=filt.year or None,
         period=filt.period or None,

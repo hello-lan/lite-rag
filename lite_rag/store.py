@@ -11,21 +11,21 @@ import sqlite3
 from pathlib import Path
 
 from lite_rag.config import ROOT, log, resolve_path
-from lite_rag.meta import TYPES_BY_SCOPE, DocMeta, SearchFilter, doc_from_row
+from lite_rag.meta import SCOPES, TYPES_BY_SCOPE, DocMeta, SearchFilter, doc_from_row
 
 _PUNCT = re.compile(r"^[\s\W_]+$", re.UNICODE)
 _jieba_ready = False
 _model = None
 
+# financial_report / knowledge 分表；id 只在表内唯一，检索与 BM25 必须带 scope。
+CHUNK_TABLES = {
+    "financial_report": "financial_report_chunks",
+    "knowledge": "knowledge_chunks",
+}
+_LEGACY_CHUNK_TABLES = ("chunks", "company_chunks")
 
-def connect_db(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.isolation_level = "DEFERRED"
-    return conn
-
-
-_REQUIRED_COLUMNS = frozenset({
+# scope 由分表表达，不再单独建列；查询时用字面量补回给 DocMeta / API。
+_COMMON_COLUMNS = (
     "id",
     "source_doc_id",
     "source_name",
@@ -35,36 +35,162 @@ _REQUIRED_COLUMNS = frozenset({
     "split_config",
     "embed_model_name",
     "created_at",
-    "scope",
     "doc_type",
     "title",
-    "company",
-    "stock_code",
-    "year",
-    "period",
-    "published_on",
-    "author",
-    "section",
-    "entity",
-    "figure",
-    "occasion",
-})
-
-_CHUNK_COLUMNS = """
-    id, source_doc_id, source_name, source_path, chunk_text, chunk_idx,
-    split_config, embed_model_name, scope, doc_type, title, company,
-    stock_code, year, period, published_on, author, section, entity,
-    figure, occasion
+)
+# 两边元信息不同：公司材料看股票/报告期，通识材料看人物/场合。
+_SCOPE_META_COLUMNS = {
+    "financial_report": (
+        "stock_name",
+        "stock_code",
+        "period",
+        "published_on",
+        "section",
+        "entity",
+    ),
+    "knowledge": (
+        "year",
+        "published_on",
+        "figure",
+        "occasion",
+    ),
+}
+_COMMON_CREATE_SQL = """
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_doc_id TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    chunk_text TEXT NOT NULL,
+    chunk_idx INTEGER NOT NULL,
+    split_config TEXT NOT NULL,
+    embed_model_name TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    doc_type TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT ''
 """
+_SCOPE_CREATE_SQL = {
+    "financial_report": """
+    , stock_name TEXT NOT NULL DEFAULT ''
+    , stock_code TEXT NOT NULL DEFAULT ''
+    , period TEXT NOT NULL DEFAULT ''
+    , published_on TEXT NOT NULL DEFAULT ''
+    , section TEXT NOT NULL DEFAULT ''
+    , entity TEXT NOT NULL DEFAULT ''
+    """,
+    "knowledge": """
+    , year INTEGER NOT NULL DEFAULT 0
+    , published_on TEXT NOT NULL DEFAULT ''
+    , figure TEXT NOT NULL DEFAULT ''
+    , occasion TEXT NOT NULL DEFAULT ''
+    """,
+}
 
 
-def _table_columns(conn: sqlite3.Connection) -> set[str] | None:
-    found = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'chunks'"
+def required_columns(scope: str) -> frozenset[str]:
+    return frozenset(_COMMON_COLUMNS + _SCOPE_META_COLUMNS[scope])
+
+
+def chunk_select_columns(scope: str) -> str:
+    """查询用列：不含 created_at；scope 用表所属分区的字面量补回。"""
+    cols = [name for name in _COMMON_COLUMNS if name != "created_at"]
+    cols.extend(_SCOPE_META_COLUMNS[scope])
+    quoted = scope.replace("'", "''")
+    return f"'{quoted}' AS scope, " + ", ".join(cols)
+
+
+def _meta_values(doc: DocMeta, scope: str) -> list:
+    values = {
+        "stock_name": doc.stock_name,
+        "stock_code": doc.stock_code,
+        "year": doc.year,
+        "period": doc.period,
+        "published_on": doc.published_on,
+        "section": doc.section,
+        "entity": doc.entity,
+        "figure": doc.figure,
+        "occasion": doc.occasion,
+    }
+    return [values[name] for name in _SCOPE_META_COLUMNS[scope]]
+
+
+def connect_db(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.isolation_level = "DEFERRED"
+    return conn
+
+
+def chunk_table(scope: str) -> str:
+    table = CHUNK_TABLES.get(scope)
+    if not table:
+        names = "、".join(SCOPES)
+        raise ValueError(f"scope 只能是 {names}")
+    return table
+
+
+def scopes_for_filter(filt: SearchFilter) -> list[str]:
+    """按筛选推断要查哪些 scope。跨 scope 时 id 会冲突，检索侧应只要一个。"""
+    if filt.scope:
+        return [filt.scope]
+    if filt.doc_type:
+        for scope, types in TYPES_BY_SCOPE.items():
+            if filt.doc_type in types:
+                return [scope]
+        return []
+    if filt.stock_name or filt.stock_code or filt.period or filt.section or filt.entity:
+        return ["financial_report"]
+    if filt.figure or filt.occasion:
+        return ["knowledge"]
+    return list(SCOPES)
+
+
+def require_one_scope(filt: SearchFilter) -> str:
+    scopes = scopes_for_filter(filt)
+    if len(scopes) == 1:
+        return scopes[0]
+    names = "、".join(SCOPES)
+    raise SystemExit(f"查询需要明确的 scope（{names}）")
+
+
+def bm25_paths(cfg: dict) -> dict[str, Path]:
+    raw = (cfg.get("paths") or {}).get("bm25_index")
+    if not isinstance(raw, dict) or not raw:
+        raise SystemExit("配置缺少 paths.bm25_index（需按 scope 分别指定）")
+    paths: dict[str, Path] = {}
+    for scope in SCOPES:
+        value = raw.get(scope)
+        if not value:
+            raise SystemExit(f"配置缺少 paths.bm25_index.{scope}")
+        paths[scope] = resolve_path(cfg, value)
+    return paths
+
+
+def bm25_path_for(cfg: dict, scope: str) -> Path:
+    return bm25_paths(cfg)[scope]
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
     ).fetchone()
-    if not found:
+    return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, name: str) -> set[str] | None:
+    if not _table_exists(conn, name):
         return None
-    return {row["name"] for row in conn.execute("PRAGMA table_info(chunks)")}
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({name})")}
+
+
+def _schema_tables_current(conn: sqlite3.Connection) -> bool:
+    if any(_table_exists(conn, name) for name in _LEGACY_CHUNK_TABLES):
+        return False
+    for scope, table in CHUNK_TABLES.items():
+        columns = _table_columns(conn, table)
+        if columns is None or columns != required_columns(scope):
+            return False
+    return True
 
 
 def schema_is_current(db_path: Path) -> bool:
@@ -72,65 +198,87 @@ def schema_is_current(db_path: Path) -> bool:
         return False
     conn = connect_db(db_path)
     try:
-        columns = _table_columns(conn)
+        return _schema_tables_current(conn)
     finally:
         conn.close()
-    return columns is not None and _REQUIRED_COLUMNS.issubset(columns)
+
+
+def _create_chunk_table(conn: sqlite3.Connection, scope: str) -> None:
+    table = CHUNK_TABLES[scope]
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {table} ({_COMMON_CREATE_SQL}{_SCOPE_CREATE_SQL[scope]})")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_source ON {table}(source_doc_id)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_doc_type ON {table}(doc_type)")
+    if scope == "financial_report":
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_stock ON {table}(stock_code)")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_stock_name ON {table}(stock_name)")
+    elif scope == "knowledge":
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_figure ON {table}(figure)")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_year ON {table}(year)")
 
 
 def init_meta_db(db_path: Path) -> bool:
-    """确保 chunks 是当前结构。旧表直接删除，返回是否清掉了旧库。"""
+    """确保 financial_report_chunks / knowledge_chunks 是当前结构。旧表直接删除，返回是否清掉了旧库。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect_db(db_path)
     reset = False
     try:
-        columns = _table_columns(conn)
-        if columns is not None and not _REQUIRED_COLUMNS.issubset(columns):
-            conn.execute("DROP TABLE chunks")
-            reset = True
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source_doc_id TEXT NOT NULL,
-                source_name TEXT NOT NULL,
-                source_path TEXT NOT NULL,
-                chunk_text TEXT NOT NULL,
-                chunk_idx INTEGER NOT NULL,
-                split_config TEXT NOT NULL,
-                embed_model_name TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                scope TEXT NOT NULL DEFAULT '',
-                doc_type TEXT NOT NULL DEFAULT '',
-                title TEXT NOT NULL DEFAULT '',
-                company TEXT NOT NULL DEFAULT '',
-                stock_code TEXT NOT NULL DEFAULT '',
-                year INTEGER NOT NULL DEFAULT 0,
-                period TEXT NOT NULL DEFAULT '',
-                published_on TEXT NOT NULL DEFAULT '',
-                author TEXT NOT NULL DEFAULT '',
-                section TEXT NOT NULL DEFAULT '',
-                entity TEXT NOT NULL DEFAULT '',
-                figure TEXT NOT NULL DEFAULT '',
-                occasion TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_doc_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_scope ON chunks(scope, doc_type)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_stock ON chunks(stock_code)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_company ON chunks(company)")
+        if not _schema_tables_current(conn):
+            for name in (*_LEGACY_CHUNK_TABLES, *CHUNK_TABLES.values()):
+                if _table_exists(conn, name):
+                    conn.execute(f"DROP TABLE {name}")
+                    reset = True
+        for scope in CHUNK_TABLES:
+            _create_chunk_table(conn, scope)
         conn.commit()
     finally:
         conn.close()
     return reset
 
 
-def load_doc_chunks(conn: sqlite3.Connection, source_doc_id: str) -> list[sqlite3.Row]:
+def _find_source_table(conn: sqlite3.Connection, source_doc_id: str) -> str | None:
+    for table in CHUNK_TABLES.values():
+        row = conn.execute(
+            f"SELECT 1 FROM {table} WHERE source_doc_id = ? LIMIT 1",
+            (source_doc_id,),
+        ).fetchone()
+        if row:
+            return table
+    return None
+
+
+def _scope_for_table(table: str) -> str:
+    for scope, name in CHUNK_TABLES.items():
+        if name == table:
+            return scope
+    raise ValueError(f"未知 chunk 表: {table}")
+
+
+def load_doc_chunks(
+    conn: sqlite3.Connection,
+    source_doc_id: str,
+    *,
+    scope: str | None = None,
+) -> list[sqlite3.Row]:
+    if scope:
+        table = chunk_table(scope)
+        columns = chunk_select_columns(scope)
+        return conn.execute(
+            f"""
+            SELECT {columns}
+            FROM {table}
+            WHERE source_doc_id = ?
+            ORDER BY chunk_idx
+            """,
+            (source_doc_id,),
+        ).fetchall()
+    table = _find_source_table(conn, source_doc_id)
+    if not table:
+        return []
+    columns = chunk_select_columns(_scope_for_table(table))
     return conn.execute(
         f"""
-        SELECT {_CHUNK_COLUMNS}
-        FROM chunks
+        SELECT {columns}
+        FROM {table}
         WHERE source_doc_id = ?
         ORDER BY chunk_idx
         """,
@@ -139,11 +287,14 @@ def load_doc_chunks(conn: sqlite3.Connection, source_doc_id: str) -> list[sqlite
 
 
 def delete_doc(conn: sqlite3.Connection, client, cfg: dict, source_doc_id: str) -> int:
-    rows = conn.execute("SELECT id FROM chunks WHERE source_doc_id = ?", (source_doc_id,)).fetchall()
+    table = _find_source_table(conn, source_doc_id)
+    if not table:
+        return 0
+    rows = conn.execute(f"SELECT id FROM {table} WHERE source_doc_id = ?", (source_doc_id,)).fetchall()
     ids = [str(row["id"]) for row in rows]
     delete_vector_ids(client, cfg, ids)
     _delete_where_source(client, cfg, source_doc_id)
-    conn.execute("DELETE FROM chunks WHERE source_doc_id = ?", (source_doc_id,))
+    conn.execute(f"DELETE FROM {table} WHERE source_doc_id = ?", (source_doc_id,))
     return len(ids)
 
 
@@ -160,17 +311,23 @@ def insert_chunks(
 ) -> list[int]:
     if len(docs) != len(texts):
         raise ValueError("元信息数量与 chunk 数量不一致")
+    scopes = {doc.scope for doc in docs}
+    if len(scopes) != 1:
+        raise ValueError("同一文档的 chunk 必须属于同一个 scope")
+    scope = next(iter(scopes))
+    table = chunk_table(scope)
+    meta_cols = _SCOPE_META_COLUMNS[scope]
+    meta_placeholders = ", ".join("?" for _ in meta_cols)
+    meta_names = ", ".join(meta_cols)
     ids: list[int] = []
     for index, (text, doc) in enumerate(zip(texts, docs)):
         cursor = conn.execute(
-            """
-            INSERT INTO chunks (
+            f"""
+            INSERT INTO {table} (
                 source_doc_id, source_name, source_path, chunk_text,
                 chunk_idx, split_config, embed_model_name,
-                scope, doc_type, title, company, stock_code,
-                year, period, published_on, author, section, entity,
-                figure, occasion
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                doc_type, title, {meta_names}
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {meta_placeholders})
             """,
             (
                 source_doc_id,
@@ -180,19 +337,9 @@ def insert_chunks(
                 index,
                 split_cfg,
                 embed_model_name,
-                doc.scope,
                 doc.doc_type,
                 doc.title,
-                doc.company,
-                doc.stock_code,
-                doc.year,
-                doc.period,
-                doc.published_on,
-                doc.author,
-                doc.section,
-                doc.entity,
-                doc.figure,
-                doc.occasion,
+                *_meta_values(doc, scope),
             ),
         )
         ids.append(int(cursor.lastrowid))
@@ -202,56 +349,90 @@ def insert_chunks(
 def update_chunk_metas(conn: sqlite3.Connection, chunk_ids: list[int], docs: list[DocMeta]) -> None:
     if len(chunk_ids) != len(docs):
         raise ValueError("元信息数量与 chunk 数量不一致")
+    scopes = {doc.scope for doc in docs}
+    if len(scopes) != 1:
+        raise ValueError("同一批更新的 chunk 必须属于同一个 scope")
+    scope = next(iter(scopes))
+    table = chunk_table(scope)
+    meta_cols = _SCOPE_META_COLUMNS[scope]
+    assignments = ", ".join(f"{name} = ?" for name in ("doc_type", "title", *meta_cols))
     for chunk_id, doc in zip(chunk_ids, docs):
         conn.execute(
-            """
-            UPDATE chunks
-            SET scope = ?, doc_type = ?, title = ?, company = ?, stock_code = ?,
-                year = ?, period = ?, published_on = ?, author = ?,
-                section = ?, entity = ?, figure = ?, occasion = ?
+            f"""
+            UPDATE {table}
+            SET {assignments}
             WHERE id = ?
             """,
             (
-                doc.scope,
                 doc.doc_type,
                 doc.title,
-                doc.company,
-                doc.stock_code,
-                doc.year,
-                doc.period,
-                doc.published_on,
-                doc.author,
-                doc.section,
-                doc.entity,
-                doc.figure,
-                doc.occasion,
+                *_meta_values(doc, scope),
                 chunk_id,
             ),
         )
 
 
-def filter_chunk_ids(conn: sqlite3.Connection, filt: SearchFilter) -> set[int] | None:
+def filter_chunk_ids(conn: sqlite3.Connection, filt: SearchFilter, *, scope: str) -> set[int] | None:
+    table = chunk_table(scope)
     if not filt.active():
         return None
-    clause, params = filt.sql()
-    rows = conn.execute(f"SELECT id FROM chunks WHERE {clause}", params).fetchall()
+    clause, params = filt.sql(scope=scope)
+    if not clause:
+        # 筛选字段不属于这张表，不可能命中
+        return set()
+    rows = conn.execute(f"SELECT id FROM {table} WHERE {clause}", params).fetchall()
     return {int(row["id"]) for row in rows}
 
 
-def fetch_chunks(conn: sqlite3.Connection, chunk_ids: list[int]) -> list[sqlite3.Row]:
+def fetch_chunks(conn: sqlite3.Connection, chunk_ids: list[int], *, scope: str) -> list[sqlite3.Row]:
     if not chunk_ids:
         return []
+    table = chunk_table(scope)
+    columns = chunk_select_columns(scope)
     placeholders = ",".join("?" * len(chunk_ids))
     rows = conn.execute(
         f"""
-        SELECT {_CHUNK_COLUMNS}
-        FROM chunks
+        SELECT {columns}
+        FROM {table}
         WHERE id IN ({placeholders})
         """,
         chunk_ids,
     ).fetchall()
     by_id = {int(row["id"]): row for row in rows}
     return [by_id[chunk_id] for chunk_id in chunk_ids if chunk_id in by_id]
+
+
+def list_source_docs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    rows: list[sqlite3.Row] = []
+    for table in CHUNK_TABLES.values():
+        rows.extend(
+            conn.execute(
+                f"SELECT DISTINCT source_doc_id, source_name, source_path FROM {table}"
+            ).fetchall()
+        )
+    return rows
+
+
+def count_chunks(conn: sqlite3.Connection, scope: str | None = None) -> int:
+    if scope:
+        table = chunk_table(scope)
+        return int(conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
+    total = 0
+    for table in CHUNK_TABLES.values():
+        total += int(conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
+    return total
+
+
+def iter_scope_rows(conn: sqlite3.Connection, scope: str):
+    table = chunk_table(scope)
+    columns = chunk_select_columns(scope)
+    return conn.execute(
+        f"""
+        SELECT {columns}
+        FROM {table}
+        ORDER BY id
+        """
+    ).fetchall()
 
 
 def open_chroma(cfg: dict):
@@ -315,8 +496,8 @@ def doc_types_for_filter(cfg: dict, filt: SearchFilter) -> list[str]:
         if not types:
             raise SystemExit(f"scope={filt.scope} 下还没有可查询的 collection")
         return types
-    if filt.company or filt.stock_code:
-        types = sorted(doc_type for doc_type in TYPES_BY_SCOPE["company"] if doc_type in mapping)
+    if filt.stock_name or filt.stock_code:
+        types = sorted(doc_type for doc_type in TYPES_BY_SCOPE["financial_report"] if doc_type in mapping)
         if not types:
             raise SystemExit("公司材料还没有对应的 Chroma collection")
         return types
@@ -385,7 +566,7 @@ def clear_source_vectors(client, cfg: dict, source_doc_ids: set[str], ids: list[
 
 _CHROMA_QUERY_FIELDS = {
     "investment_theory": frozenset({"doc_type", "figure", "occasion", "year"}),
-    "filing": frozenset({"company", "stock_code", "period", "section", "entity"}),
+    "filing": frozenset({"stock_name", "stock_code", "period", "section", "entity"}),
 }
 
 
@@ -402,8 +583,8 @@ def chroma_meta(source_doc_id: str, doc: DocMeta) -> dict:
             meta["year"] = int(doc.year)
         return meta
     if doc.doc_type == "filing":
-        if doc.company:
-            meta["company"] = doc.company
+        if doc.stock_name:
+            meta["stock_name"] = doc.stock_name
         if doc.stock_code:
             meta["stock_code"] = doc.stock_code
         if doc.period:
@@ -419,8 +600,8 @@ def chroma_meta(source_doc_id: str, doc: DocMeta) -> dict:
 def chroma_where_fits(doc_types: list[str], filt: SearchFilter) -> bool:
     """筛选字段必须是每个目标 collection 都有的，否则这次向量检索没有命中。"""
     needed: set[str] = set()
-    if filt.company:
-        needed.add("company")
+    if filt.stock_name:
+        needed.add("stock_name")
     if filt.stock_code:
         needed.add("stock_code")
     if filt.year:
@@ -582,27 +763,39 @@ def tokenize(text: str) -> list[str]:
     return tokens or raw or ["空"]
 
 
-def rebuild_bm25(conn: sqlite3.Connection, index_path: Path) -> int:
+def rebuild_bm25(conn: sqlite3.Connection, index_path: Path, *, scope: str) -> int:
     from rank_bm25 import BM25Okapi
 
-    rows = conn.execute("SELECT id, chunk_text FROM chunks ORDER BY id").fetchall()
+    table = chunk_table(scope)
+    rows = conn.execute(f"SELECT id, chunk_text FROM {table} ORDER BY id").fetchall()
     chunk_ids = [int(row["id"]) for row in rows]
     index_path.parent.mkdir(parents=True, exist_ok=True)
     if not chunk_ids:
-        payload = {"chunk_ids": [], "bm25": None}
+        payload = {"scope": scope, "chunk_ids": [], "bm25": None}
     else:
         tokenized = [tokenize(row["chunk_text"]) for row in rows]
-        payload = {"chunk_ids": chunk_ids, "bm25": BM25Okapi(tokenized)}
+        payload = {"scope": scope, "chunk_ids": chunk_ids, "bm25": BM25Okapi(tokenized)}
     with index_path.open("wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
     return len(chunk_ids)
 
 
-def load_bm25(index_path: Path) -> dict:
+def rebuild_all_bm25(conn: sqlite3.Connection, cfg: dict) -> int:
+    total = 0
+    for scope, path in bm25_paths(cfg).items():
+        count = rebuild_bm25(conn, path, scope=scope)
+        total += count
+        log.info("BM25[%s] 共 %s 个 chunk → %s", scope, count, path.name)
+    return total
+
+
+def load_bm25(index_path: Path, *, scope: str | None = None) -> dict:
     if not index_path.exists():
-        raise SystemExit(f"没有找到 {index_path}，请先运行 python main.py ingest 或 python main.py ingest-split")
+        raise SystemExit(f"没有找到 {index_path}，请先运行 python main.py ingest-split")
     with index_path.open("rb") as f:
         payload = pickle.load(f)
+    if scope and payload.get("scope") not in (None, scope):
+        raise SystemExit(f"BM25 索引 scope={payload.get('scope')} 与查询 {scope} 不一致，请重建")
     if not payload.get("chunk_ids") or payload.get("bm25") is None:
-        raise SystemExit("BM25 索引是空的，请先运行 python main.py ingest 或 python main.py ingest-split")
+        raise SystemExit("BM25 索引是空的，请先运行 python main.py ingest-split")
     return payload

@@ -120,7 +120,7 @@ def resolve_company(code: str, timeout: float, retries: int, pause: float) -> di
         short_name = named.group(1).strip()
     if not uid_match or not short_name:
         raise RuntimeError(f"{code} 上证e互动没有这只股票")
-    return {"stock_code": code, "company": short_name, "uid": uid_match.group(1)}
+    return {"stock_code": code, "stock_name": short_name, "uid": uid_match.group(1)}
 
 
 def normalize_time(value: str) -> str:
@@ -163,7 +163,7 @@ def parse_feed(page: str, company: dict) -> list[dict]:
             {
                 "index_id": match.group(1),
                 "stock_code": company["stock_code"],
-                "company": company["company"],
+                "stock_name": company["stock_name"],
                 "uid": company["uid"],
                 "question": question,
                 "answer": answer,
@@ -210,7 +210,7 @@ def fetch_feed(company: dict, feed_type: str, label: str, args: argparse.Namespa
         log.info(
             "%s %s %s 第 %s 页，新增 %s 条",
             company["stock_code"],
-            company["company"],
+            company["stock_name"],
             label,
             page_no,
             len(fresh),
@@ -271,7 +271,7 @@ def display_time(value: str) -> str:
 def render_markdown(records: list[dict], fetched_at: str) -> str:
     first = records[0]
     lines = [
-        f"# {first['company']}（{first['stock_code']}）投资者互动问答",
+        f"# {first['stock_name']}（{first['stock_code']}）投资者互动问答",
         "",
         f"来源：上证e互动 {first['url']}",
         "说明：公司页目前只展示近一个月的提问和答复。",
@@ -280,7 +280,7 @@ def render_markdown(records: list[dict], fetched_at: str) -> str:
         "",
     ]
     for record in records:
-        lines.append(f"{record['company']}（{record['stock_code']}）{display_time(record['question_time'])}")
+        lines.append(f"{record['stock_name']}（{record['stock_code']}）{display_time(record['question_time'])}")
         lines.append("")
         lines.append(f"问：{record['question']}")
         lines.append("")
@@ -302,7 +302,7 @@ def crawl_one(code: str, args: argparse.Namespace, fetched_at: str) -> None:
     records = [record for record in merge_records(answered, questions) if keep_record(record, args)]
     records.sort(key=lambda record: record["question_time"], reverse=True)
     if not records:
-        log.info("%s %s 没有符合条件的问答", code, company["company"])
+        log.info("%s %s 没有符合条件的问答", code, company["stock_name"])
         return
     paths = write_outputs(
         records,

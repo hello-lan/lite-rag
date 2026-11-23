@@ -193,7 +193,7 @@ def to_record(company: dict, row: dict) -> dict:
     return {
         "index_id": str(row.get("indexId") or ""),
         "stock_code": code,
-        "company": name,
+        "stock_name": name,
         "org_id": org_id,
         "trade": trade_name,
         "question": question,
@@ -218,7 +218,7 @@ def keep_record(record: dict, answered_only: bool) -> bool:
 def render_markdown(records: list[dict], fetched_at: str) -> str:
     first = records[0]
     lines = [
-        f"# {first['company']}（{first['stock_code']}）投资者互动问答",
+        f"# {first['stock_name']}（{first['stock_code']}）投资者互动问答",
         "",
         f"来源：深交所互动易 {first['url']}",
         f"抓取时间：{fetched_at}",
@@ -227,7 +227,7 @@ def render_markdown(records: list[dict], fetched_at: str) -> str:
     ]
     for record in records:
         when = record["question_time"] or "时间未知"
-        lines.append(f"{record['company']}（{record['stock_code']}）{when}")
+        lines.append(f"{record['stock_name']}（{record['stock_code']}）{when}")
         lines.append("")
         lines.append(f"问：{record['question']}")
         lines.append("")

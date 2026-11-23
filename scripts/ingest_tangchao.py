@@ -1,6 +1,7 @@
-"""把 corpus/tangchao 的 Markdown 写成预切分 JSON，并交给 ingest-split 写入索引。
+"""把 corpus/tangchao 的 Markdown 切成预切分 JSON，再交给 ingest-split 写入索引。
 
-不改 lite_rag 的入库流程。文稿记为投资理论（knowledge/investment_theory），人物唐朝，场合文章。
+切分在本脚本完成（scripts.text_split）；lite_rag 只导入 JSON。
+文稿记为投资理论（knowledge/investment_theory），人物唐朝，场合文章。
 标题和发布日期从文件名解析。图片、image_texts.json 和压缩包不处理。
 
 示例：
@@ -25,8 +26,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lite_rag.config import configure_stdio, load_config, resolve_path
-from lite_rag.documents import iter_source_files, md_to_text, split_document
 from lite_rag.ingest import ingest_split_documents
+from scripts.extract_text import iter_source_files, md_to_text
+from scripts.text_split import split_document
 
 log = logging.getLogger("tangchao")
 

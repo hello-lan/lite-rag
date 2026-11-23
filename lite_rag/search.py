@@ -5,11 +5,13 @@ from __future__ import annotations
 from lite_rag.config import resolve_path
 from lite_rag.meta import SearchFilter, public_meta
 from lite_rag.store import (
+    bm25_path_for,
     chroma_where_fits,
     collection_name,
     vector_where,
     configured_collection_names,
     connect_db,
+    count_chunks,
     doc_types_for_filter,
     embed_texts,
     ensure_collections,
@@ -21,6 +23,7 @@ from lite_rag.store import (
     open_chroma,
     open_named_collection,
     release_model,
+    require_one_scope,
     tokenize,
 )
 
@@ -30,10 +33,12 @@ def bm25_search(
     question: str,
     top_k: int,
     allowed: set[int] | None = None,
+    *,
+    scope: str,
 ) -> list[tuple[int, float]]:
     import numpy as np
 
-    payload = load_bm25(resolve_path(cfg, cfg["paths"]["bm25_index"]))
+    payload = load_bm25(bm25_path_for(cfg, scope), scope=scope)
     scores = payload["bm25"].get_scores(tokenize(question))
     order = np.argsort(scores)[::-1]
     hits: list[tuple[int, float]] = []
@@ -79,7 +84,7 @@ def vector_search(
             if name not in selected
         )
         if not others_have_data:
-            raise SystemExit("向量库是空的，请先运行 python main.py ingest")
+            raise SystemExit("向量库是空的，请先运行 python main.py ingest-split")
         return []
 
     searchable: list[tuple[object, int, dict | None]] = []
@@ -144,7 +149,7 @@ def retrieve(
     *,
     scope: str | None = None,
     doc_type: str | None = None,
-    company: str | None = None,
+    stock_name: str | None = None,
     stock_code: str | None = None,
     year: int | None = None,
     period: str | None = None,
@@ -156,7 +161,7 @@ def retrieve(
     filt = SearchFilter.parse(
         scope=scope,
         doc_type=doc_type,
-        company=company,
+        stock_name=stock_name,
         stock_code=stock_code,
         year=year,
         period=period,
@@ -171,20 +176,21 @@ def retrieve(
     rrf_k = int(cfg["retrieval"].get("rrf_k", 60))
     db_path = resolve_path(cfg, cfg["paths"]["meta_db"])
     if not db_path.exists():
-        raise SystemExit(f"没有找到 {db_path}，请先运行 python main.py ingest")
+        raise SystemExit(f"没有找到 {db_path}，请先运行 python main.py ingest-split")
 
+    scope = require_one_scope(filt)
     where = filt.chroma_where()
     conn = connect_db(db_path)
     try:
-        total = conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
+        total = count_chunks(conn, scope)
         if total == 0:
-            raise SystemExit("索引是空的，请先运行 python main.py ingest")
-        allowed = filter_chunk_ids(conn, filt)
+            raise SystemExit(f"索引是空的（scope={scope}），请先运行 python main.py ingest-split")
+        allowed = filter_chunk_ids(conn, filt, scope=scope)
         if allowed is not None and not allowed:
             return []
 
         if mode == "bm25":
-            pairs = bm25_search(cfg, question, top_k, allowed)
+            pairs = bm25_search(cfg, question, top_k, allowed, scope=scope)
             ordered_ids = [chunk_id for chunk_id, _score in pairs]
             score_map = {chunk_id: score for chunk_id, score in pairs}
             score_name = "bm25"
@@ -194,13 +200,16 @@ def retrieve(
             score_map = {chunk_id: score for chunk_id, score in pairs}
             score_name = "distance"
         else:
-            bm25_ids = [chunk_id for chunk_id, _score in bm25_search(cfg, question, candidate_k, allowed)]
+            bm25_ids = [
+                chunk_id
+                for chunk_id, _score in bm25_search(cfg, question, candidate_k, allowed, scope=scope)
+            ]
             vector_ids = [chunk_id for chunk_id, _score in vector_search(cfg, question, candidate_k, where, filt)]
             fused_ids, score_map = reciprocal_rank_fusion([bm25_ids, vector_ids], k=rrf_k)
             ordered_ids = fused_ids[:top_k]
             score_name = "rrf"
 
-        rows = fetch_chunks(conn, ordered_ids)
+        rows = fetch_chunks(conn, ordered_ids, scope=scope)
     finally:
         conn.close()
 

@@ -1,42 +1,45 @@
-"""把 corpus/02_processed 写入索引，把 corpus/03_splited 的预切分 JSON 嵌入入库，或只按 sqlite 原文重算向量。"""
+"""把 corpus/03_splited 的预切分 JSON 嵌入入库，或按 sqlite 原文重算向量。"""
 
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 
-from lite_rag.config import log, resolve_path, split_config_of
+from lite_rag.config import log, resolve_path
 from lite_rag.documents import (
-    iter_source_files,
     iter_split_files,
-    load_source,
     load_split_file,
     relative_to_root,
     source_doc_id,
-    split_document,
 )
 from lite_rag.meta import DocMeta, doc_from_row
 from lite_rag.store import (
+    CHUNK_TABLES,
+    bm25_paths,
     chroma_has_ids,
     chroma_meta,
     chroma_meta_from_row,
     chroma_update_meta,
     chroma_upsert,
+    chunk_table,
     clear_source_vectors,
     collection_map,
     collection_name,
     configured_collection_names,
     connect_db,
+    count_chunks,
     delete_doc,
     embed_texts,
     ensure_collections,
     get_model,
     init_meta_db,
     insert_chunks,
+    iter_scope_rows,
+    list_source_docs,
     load_doc_chunks,
     open_chroma,
     open_named_collection,
-    rebuild_bm25,
+    rebuild_all_bm25,
     reset_collections,
     schema_is_current,
     update_chunk_metas,
@@ -59,13 +62,6 @@ def split_dir_of(cfg: dict) -> Path:
     return resolve_path(cfg, raw)
 
 
-def docs_dir_of(cfg: dict) -> Path:
-    raw = (cfg.get("paths") or {}).get("docs_dir")
-    if not raw:
-        raise SystemExit("配置缺少 paths.docs_dir")
-    return resolve_path(cfg, raw)
-
-
 def _scan_dirs(configured: Path, directory: Path | str | None, cfg: dict) -> tuple[Path, Path]:
     """返回本次扫描目录，以及计算文档 id 用的根目录。
 
@@ -84,10 +80,6 @@ def _scan_dirs(configured: Path, directory: Path | str | None, cfg: dict) -> tup
 
 def split_scan_dirs(cfg: dict, directory: Path | str | None) -> tuple[Path, Path]:
     return _scan_dirs(split_dir_of(cfg), directory, cfg)
-
-
-def docs_scan_dirs(cfg: dict, directory: Path | str | None) -> tuple[Path, Path]:
-    return _scan_dirs(docs_dir_of(cfg), directory, cfg)
 
 
 def _path_under(source_path: str, directory: Path, root: Path) -> bool:
@@ -176,9 +168,7 @@ def prune_missing(
     skip_under: Path | None = None,
     only_under: Path | None = None,
 ) -> int:
-    rows = conn.execute(
-        "SELECT DISTINCT source_doc_id, source_name, source_path FROM chunks"
-    ).fetchall()
+    rows = list_source_docs(conn)
     removed = 0
     for row in rows:
         source_path = row["source_path"] or ""
@@ -192,30 +182,6 @@ def prune_missing(
         removed += 1
         log.info("删除已不存在的文档: %s", row["source_name"])
     return removed
-
-
-def check_documents(scan_dir: Path, id_root: Path, cfg: dict) -> None:
-    files = iter_source_files(scan_dir)
-    if not files:
-        raise SystemExit(f"{scan_dir} 里没有 PDF 或 Markdown。请把材料放进该目录。")
-    for path in files:
-        text, doc, warning = load_source(id_root, path)
-        if warning:
-            log.warning(warning)
-        if not text:
-            log.info("未抽出文本（扫描件需要另外做 OCR）: %s", path.name)
-            continue
-        chunks = split_document(text, cfg)
-        who = doc.company or doc.title
-        log.info(
-            "%s  %s/%s  %s  字符 %s  chunk %s",
-            path.name,
-            doc.scope,
-            doc.doc_type,
-            who,
-            len(text),
-            len(chunks),
-        )
 
 
 def upsert_existing(conn, client, rows, cfg: dict, docs: list[DocMeta] | None = None) -> None:
@@ -234,8 +200,12 @@ def upsert_existing(conn, client, rows, cfg: dict, docs: list[DocMeta] | None = 
     ]
     clear_source_vectors(client, cfg, {row["source_doc_id"] for row in rows}, ids)
     _upsert_groups(client, cfg, ids, vectors, metas, meta_docs)
+    scopes = {doc.scope for doc in meta_docs}
+    if len(scopes) != 1:
+        raise SystemExit("同一批补写的 chunk 必须属于同一个 scope")
+    table = chunk_table(next(iter(scopes)))
     conn.execute(
-        f"UPDATE chunks SET embed_model_name = ? WHERE id IN ({','.join('?' * len(ids))})",
+        f"UPDATE {table} SET embed_model_name = ? WHERE id IN ({','.join('?' * len(ids))})",
         [model_name, *[int(chunk_id) for chunk_id in ids]],
     )
 
@@ -347,124 +317,9 @@ def store_chunks(
     metas = [chroma_meta(doc_id, item) for item in docs]
     _upsert_groups(client, cfg, ids, vectors, metas, docs)
     head = docs[0]
-    who = head.stock_code or head.company or "-"
+    who = head.stock_code or head.stock_name or "-"
     log.info("写入 %s：%s 个 chunk [%s/%s %s]", source_name, len(chunk_ids), head.scope, head.doc_type, who)
     return "written"
-
-
-def ingest_file(conn, client, cfg, docs_dir, path, force: bool) -> str:
-    text, doc, warning = load_source(docs_dir, path)
-    if warning:
-        log.warning(warning)
-    doc_id = source_doc_id(docs_dir, path)
-    texts = split_document(text, cfg) if text else []
-    if not texts:
-        log.info("跳过（未抽出文本，扫描件需要 OCR）: %s", path.name)
-        if load_doc_chunks(conn, doc_id):
-            delete_doc(conn, client, cfg, doc_id)
-            return "dropped"
-        return "empty"
-    return store_chunks(
-        conn,
-        client,
-        cfg,
-        doc_id=doc_id,
-        source_name=path.name,
-        source_path=relative_to_root(cfg, path),
-        texts=texts,
-        doc=doc,
-        split_cfg=split_config_of(cfg),
-        force=force,
-    )
-
-
-def ingest_documents(
-    cfg: dict,
-    *,
-    force: bool,
-    check: bool,
-    bm25_only: bool,
-    docs_dir: Path | str | None = None,
-) -> None:
-    directory, id_root = docs_scan_dirs(cfg, docs_dir)
-    db_path = resolve_path(cfg, cfg["paths"]["meta_db"])
-    bm25_path = resolve_path(cfg, cfg["paths"]["bm25_index"])
-
-    if check:
-        if not directory.exists():
-            raise SystemExit(f"文档目录不存在: {directory}")
-        check_documents(directory, id_root, cfg)
-        return
-
-    if bm25_only:
-        if db_path.exists() and not schema_is_current(db_path):
-            raise SystemExit(
-                "索引结构已更换。请运行 python main.py ingest 或 python main.py ingest-split，"
-                "旧库会在入库时清空并重建。"
-            )
-        init_meta_db(db_path)
-        conn = connect_db(db_path)
-        try:
-            count = rebuild_bm25(conn, bm25_path)
-            log.info("BM25 已按 sqlite 重建，共 %s 个 chunk", count)
-        finally:
-            conn.close()
-        return
-
-    reset = init_meta_db(db_path)
-    if reset:
-        log.info("旧索引已删除，将按 %s 重新入库。预切分 JSON 需要再运行 python main.py ingest-split", directory)
-        if bm25_path.exists():
-            bm25_path.unlink()
-    client = _chroma_client(cfg, reset=reset)
-    conn = connect_db(db_path)
-    try:
-        if not directory.exists():
-            raise SystemExit(f"文档目录不存在: {directory}")
-        files = iter_source_files(directory)
-        if not files:
-            raise SystemExit(f"{directory} 里没有 PDF 或 Markdown。")
-        narrowed = directory.resolve() != docs_dir_of(cfg).resolve()
-        removed = prune_missing(
-            conn,
-            client,
-            cfg,
-            live_ids={source_doc_id(id_root, path) for path in files},
-            root=cfg["_root"],
-            skip_under=split_dir_of(cfg),
-            only_under=directory if narrowed else None,
-        )
-        conn.commit()
-        counts = {"written": 0, "repaired": 0, "retagged": 0, "skipped": 0, "empty": 0, "dropped": 0}
-        for path in files:
-            try:
-                status = ingest_file(conn, client, cfg, id_root, path, force)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            counts[status] += 1
-
-        dirty = any(counts[key] for key in ("written", "repaired", "dropped")) or removed or not bm25_path.exists()
-        if dirty:
-            count = rebuild_bm25(conn, bm25_path)
-            log.info("BM25 已更新，共 %s 个 chunk → %s", count, bm25_path.name)
-        else:
-            log.info("文档和向量都没有变化，BM25 保持原样")
-        total = conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
-        log.info(
-            "完成。写入 %s，补向量 %s，更新元信息 %s，跳过 %s，无文本 %s，清除空文档 %s，删除缺失 %s，sqlite 现有 %s 个 chunk",
-            counts["written"],
-            counts["repaired"],
-            counts["retagged"],
-            counts["skipped"],
-            counts["empty"],
-            counts["dropped"],
-            removed,
-            total,
-        )
-    finally:
-        conn.close()
 
 
 def check_split_documents(split_dir: Path) -> None:
@@ -477,7 +332,7 @@ def check_split_documents(split_dir: Path) -> None:
         except ValueError as exc:
             raise SystemExit(f"{_relative(split_dir, path)}: {exc}") from exc
         doc = docs[0]
-        who = doc.company or doc.title
+        who = doc.stock_name or doc.title
         log.info(
             "%s  %s/%s  %s  split %s  chunk %s",
             path.name,
@@ -513,11 +368,12 @@ def ingest_split_documents(
     *,
     force: bool,
     check: bool,
+    bm25_only: bool = False,
     split_dir: Path | str | None = None,
 ) -> None:
     directory, id_root = split_scan_dirs(cfg, split_dir)
     db_path = resolve_path(cfg, cfg["paths"]["meta_db"])
-    bm25_path = resolve_path(cfg, cfg["paths"]["bm25_index"])
+    bm25_files = list(bm25_paths(cfg).values())
 
     if check:
         if not directory.exists():
@@ -525,11 +381,26 @@ def ingest_split_documents(
         check_split_documents(directory)
         return
 
+    if bm25_only:
+        if db_path.exists() and not schema_is_current(db_path):
+            raise SystemExit(
+                "索引结构已更换。请运行 python main.py ingest-split，旧库会在入库时清空并重建。"
+            )
+        init_meta_db(db_path)
+        conn = connect_db(db_path)
+        try:
+            count = rebuild_all_bm25(conn, cfg)
+            log.info("BM25 已按 sqlite 重建，共 %s 个 chunk", count)
+        finally:
+            conn.close()
+        return
+
     reset = init_meta_db(db_path)
     if reset:
-        log.info("旧索引已删除，这次只写入 %s。PDF 和 Markdown 需要再运行 python main.py ingest", directory)
-        if bm25_path.exists():
-            bm25_path.unlink()
+        log.info("旧索引已删除，这次只写入预切分 JSON：%s", directory)
+        for path in bm25_files:
+            if path.exists():
+                path.unlink()
     client = _chroma_client(cfg, reset=reset)
     conn = connect_db(db_path)
     try:
@@ -557,21 +428,24 @@ def ingest_split_documents(
                 raise
             counts[status] += 1
 
-        dirty = any(counts[key] for key in ("written", "repaired")) or removed or not bm25_path.exists()
+        bm25_missing = any(not path.exists() for path in bm25_files)
+        dirty = any(counts[key] for key in ("written", "repaired")) or removed or bm25_missing
         if dirty:
-            count = rebuild_bm25(conn, bm25_path)
-            log.info("BM25 已更新，共 %s 个 chunk → %s", count, bm25_path.name)
+            count = rebuild_all_bm25(conn, cfg)
+            log.info("BM25 已更新，共 %s 个 chunk", count)
         else:
             log.info("文档和向量都没有变化，BM25 保持原样")
-        total = conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
+        total = count_chunks(conn)
+        parts = "，".join(f"{scope}={count_chunks(conn, scope)}" for scope in CHUNK_TABLES)
         log.info(
-            "完成。写入 %s，补向量 %s，更新元信息 %s，跳过 %s，删除缺失 %s，sqlite 现有 %s 个 chunk",
+            "完成。写入 %s，补向量 %s，更新元信息 %s，跳过 %s，删除缺失 %s，sqlite 现有 %s 个 chunk（%s）",
             counts["written"],
             counts["repaired"],
             counts["retagged"],
             counts["skipped"],
             removed,
             total,
+            parts,
         )
     finally:
         conn.close()
@@ -580,26 +454,19 @@ def ingest_split_documents(
 def reembed_vectors(cfg: dict, *, force: bool) -> None:
     db_path = resolve_path(cfg, cfg["paths"]["meta_db"])
     if not db_path.exists():
-        raise SystemExit(f"没有找到 {db_path}，请先运行 python main.py ingest 或 python main.py ingest-split")
+        raise SystemExit(f"没有找到 {db_path}，请先运行 python main.py ingest-split")
     if not schema_is_current(db_path):
         raise SystemExit(
-            "索引结构已更换。请运行 python main.py ingest 或 python main.py ingest-split，"
-            "旧库会在入库时清空并重建。"
+            "索引结构已更换。请运行 python main.py ingest-split，旧库会在入库时清空并重建。"
         )
     init_meta_db(db_path)
     conn = connect_db(db_path)
     try:
-        rows = conn.execute(
-            """
-            SELECT id, chunk_text, source_name, source_doc_id, embed_model_name,
-                   scope, doc_type, title, company, stock_code, year, period,
-                   published_on, author, section, entity, figure, occasion
-            FROM chunks
-            ORDER BY id
-            """
-        ).fetchall()
+        rows: list = []
+        for scope in CHUNK_TABLES:
+            rows.extend(iter_scope_rows(conn, scope))
         if not rows:
-            raise SystemExit("sqlite 里没有 chunk，请先运行 python main.py ingest 或 python main.py ingest-split")
+            raise SystemExit("sqlite 里没有 chunk，请先运行 python main.py ingest-split")
 
         target = cfg["embedding"]["model_name"]
         mapping = collection_map(cfg)
@@ -624,7 +491,8 @@ def reembed_vectors(cfg: dict, *, force: bool) -> None:
 
         log.info("开始重算 %s 个 chunk，模型 %s。BM25 索引保持不变。", len(rows), target)
         vectors = embed_texts(get_model(cfg), [row["chunk_text"] for row in rows], cfg)
-        by_id = {int(row["id"]): vector for row, vector in zip(rows, vectors)}
+        # 按 (scope, id) 区分，避免两表自增 id 撞车。
+        by_key = {(row["scope"], int(row["id"])): vector for row, vector in zip(rows, vectors)}
         for doc_type, name in mapping.items():
             group = groups.get(doc_type, [])
             collection = open_named_collection(client, name, reset=True)
@@ -633,10 +501,11 @@ def reembed_vectors(cfg: dict, *, force: bool) -> None:
             chroma_upsert(
                 collection,
                 [str(row["id"]) for row in group],
-                [by_id[int(row["id"])] for row in group],
+                [by_key[(row["scope"], int(row["id"]))] for row in group],
                 [chroma_meta_from_row(row) for row in group],
             )
-        conn.execute("UPDATE chunks SET embed_model_name = ?", (target,))
+        for scope, table in CHUNK_TABLES.items():
+            conn.execute(f"UPDATE {table} SET embed_model_name = ?", (target,))
         conn.commit()
         log.info("Chroma 已重写，sqlite 中的 embed_model_name 已更新为 %s", target)
     finally:
