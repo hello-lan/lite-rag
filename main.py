@@ -183,7 +183,7 @@ def query_knowledge(
     "--section",
     type=click.Choice(list(SECTIONS)),
     default=None,
-    help="章节：profile、segment、mda、risk、material、governance、financials、notes",
+    help="章节：profile、mda、material、governance、financials、notes、other",
 )
 @click.option(
     "--entity",

@@ -42,23 +42,21 @@ _ROOT_ALIASES = {
 }
 SECTIONS = (
     "profile",
-    "segment",
     "mda",
-    "risk",
     "material",
     "governance",
     "financials",
     "notes",
+    "other",
 )
 SECTION_LABELS = {
     "profile": "公司与业务",
-    "segment": "分产品分地区",
     "mda": "经营讨论",
-    "risk": "风险因素",
     "material": "重要事项",
     "governance": "股东与治理",
     "financials": "财务报表",
     "notes": "附注",
+    "other": "其他",
 }
 ENTITIES = ("consolidated", "parent")
 ENTITY_LABELS = {

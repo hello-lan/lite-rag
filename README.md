@@ -82,7 +82,7 @@ python scripts/crawl_sse.py --code 600519 --output corpus/02_processed/financial
 
 `scope` 只能是 `financial_report` 或 `knowledge`；`doc_type` 在公司侧是 `filing`、`ir_qa`、`survey`、`research`、`news`，在通识侧是 `investment_theory`、`beginner`。`investment_theory` 还要写 `figure` 和 `occasion`：`figure` 是 `唐朝`、`buffett`（巴菲特）、`munger`（芒格）；`occasion` 是 `letter`（致投资者的信）、`meeting`（股东大会）、`speech`（演讲）、`article`（文章）。
 
-财报向量只写非空的 `stock_name`、`stock_code`、`period`、`section`、`entity`，不写 `year`。`section` 可以是 `profile`、`segment`、`mda`、`risk`、`material`、`governance`、`financials`、`notes`。`entity` 只在 `financials` 或 `notes` 上使用，取 `consolidated` 或 `parent`。查财报用 `period`，不要用 `year`；`year` 只筛投资通识。
+财报向量只写非空的 `stock_name`、`stock_code`、`period`、`section`、`entity`，不写 `year`。`section` 可以是 `profile`、`mda`、`material`、`governance`、`financials`、`notes`、`other`。`entity` 只在 `financials` 或 `notes` 上使用，取 `consolidated` 或 `parent`。查财报用 `period`，不要用 `year`；`year` 只筛投资通识。
 
 ```json
 {
@@ -157,7 +157,7 @@ python main.py serve --host 127.0.0.1 --port 8100
 
 `POST /knowledge/retrieve` 和 `POST /knowledge/query` 只查投资通识。可选筛选是 `doc_type`、`figure`、`occasion` 和 `year`。目前 `doc_type` 只有 `investment_theory`。`figure` 是 `唐朝`、`buffett`、`munger`；`occasion` 是 `letter`、`meeting`、`speech`、`article`。不传表示该层不限制。
 
-`POST /financial_report/retrieve` 和 `POST /financial_report/query` 只查定期报告。可选筛选是 `stock_name`、`stock_code`、`period`、`section` 和 `entity`。`section` 是 `profile`、`segment`、`mda`、`risk`、`material`、`governance`、`financials`、`notes`；`entity` 是 `consolidated` 或 `parent`，只用于财务报表和附注。`period` 写成 `2024`、`2024Q1` 或 `2024H1`，格式不对返回 400。
+`POST /financial_report/retrieve` 和 `POST /financial_report/query` 只查定期报告。可选筛选是 `stock_name`、`stock_code`、`period`、`section` 和 `entity`。`section` 是 `profile`、`mda`、`material`、`governance`、`financials`、`notes`、`other`；`entity` 是 `consolidated` 或 `parent`，只用于财务报表和附注。`period` 写成 `2024`、`2024Q1` 或 `2024H1`，格式不对返回 400。
 
 `question` 必填且不能为空白。`mode` 只能是 `hybrid`、`bm25` 或 `vector`，`top_k` 必须是大于 0 的整数。不传时分别使用 `retrieval.mode` 和 `retrieval.top_k`。字段说明见 `http://127.0.0.1:8100/docs`。`GET /health` 返回服务是否在运行，以及索引文件是否存在。
 

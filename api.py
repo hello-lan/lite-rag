@@ -7,7 +7,8 @@ import copy
 import json
 import threading
 from contextlib import asynccontextmanager
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -18,6 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, m
 
 from lite_rag.answer import generate_answer
 from lite_rag.config import configure_stdio, load_config, log, resolve_path
+from lite_rag.meta import (
+    DOC_TYPE_LABELS,
+    ENTITY_LABELS,
+    FIGURE_LABELS,
+    OCCASION_LABELS,
+    SECTION_LABELS,
+)
 from lite_rag.search import retrieve
 from lite_rag.store import get_model, keep_model_loaded, model_is_loaded, release_model
 
@@ -27,8 +35,39 @@ Collection = Literal["knowledge", "financial_report"]
 TheoryType = Literal["investment_theory"]
 Figure = Literal["唐朝", "buffett", "munger"]
 Occasion = Literal["letter", "meeting", "speech", "article"]
-Section = Literal["profile", "segment", "mda", "risk", "material", "governance", "financials", "notes"]
+Section = Literal["profile", "mda", "material", "governance", "financials", "notes", "other"]
 Entity = Literal["consolidated", "parent"]
+
+MODE_LABELS = {
+    "hybrid": "混合检索（BM25 + 向量）",
+    "bm25": "BM25 关键词检索",
+    "vector": "向量语义检索",
+}
+OUTPUT_LABELS = {
+    "hits": "只返回命中片段",
+    "answer": "只返回大模型回答",
+    "both": "同时返回命中和大模型回答",
+}
+COLLECTION_LABELS = {
+    "knowledge": "投资通识",
+    "financial_report": "定期报告",
+}
+THEORY_TYPE_LABELS = {
+    key: DOC_TYPE_LABELS[key] for key in ("investment_theory",) if key in DOC_TYPE_LABELS
+}
+
+
+def _enum_choices(labels: Mapping[str, str]) -> str:
+    return "；".join(f"{value}={meaning}" for value, meaning in labels.items())
+
+
+def _enum_field(description: str, labels: Mapping[str, str], **kwargs: Any):
+    """枚举字段：description 列出取值与含义，OpenAPI 额外带 x-enum-meanings 供 RAG 配置读取。"""
+    choices = _enum_choices(labels)
+    text = f"{description}。取值：{choices}" if description else f"取值：{choices}"
+    extra = dict(kwargs.pop("json_schema_extra", None) or {})
+    extra["x-enum-meanings"] = dict(labels)
+    return Field(description=text, json_schema_extra=extra, **kwargs)
 
 
 class UTF8JSONResponse(JSONResponse):
@@ -44,7 +83,11 @@ class _RequestBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(description="要查询的问题")
-    mode: Mode | None = Field(default=None, description="检索模式。不传则使用 retrieval.mode")
+    mode: Mode | None = _enum_field(
+        "检索模式。不传则使用 retrieval.mode",
+        MODE_LABELS,
+        default=None,
+    )
     top_k: StrictInt | None = Field(default=None, ge=1, description="返回的 chunk 数。不传则使用 retrieval.top_k")
 
     @field_validator("question")
@@ -59,14 +102,20 @@ class _RequestBase(BaseModel):
 class KnowledgeRetrieveRequest(_RequestBase):
     """POST /knowledge/retrieve。只查投资通识，可按大类、人物、场合和年份筛选。"""
 
-    doc_type: TheoryType | None = Field(default=None, description="大类。目前只有 investment_theory。不传则不限大类")
-    figure: Figure | None = Field(
+    doc_type: TheoryType | None = _enum_field(
+        "大类。不传则不限大类",
+        THEORY_TYPE_LABELS,
         default=None,
-        description="主要人物：唐朝，buffett 巴菲特，munger 芒格。不传则不限人物",
     )
-    occasion: Occasion | None = Field(
+    figure: Figure | None = _enum_field(
+        "主要人物。不传则不限人物",
+        FIGURE_LABELS,
         default=None,
-        description="场合：letter 致投资者的信，meeting 股东大会，speech 演讲，article 文章。不传则不限场合",
+    )
+    occasion: Occasion | None = _enum_field(
+        "场合。不传则不限场合",
+        OCCASION_LABELS,
+        default=None,
     )
     year: StrictInt | None = Field(default=None, ge=1900, le=2100, description="年份。不传则不限年份")
 
@@ -77,13 +126,15 @@ class FilingRetrieveRequest(_RequestBase):
     stock_name: str | None = Field(default=None, description="股票简称，精确匹配")
     stock_code: str | None = Field(default=None, description="6 位股票代码")
     period: str | None = Field(default=None, description="报告期，如 2024、2024Q1、2024H1。累计口径")
-    section: Section | None = Field(
+    section: Section | None = _enum_field(
+        "章节。不传则不限章节",
+        SECTION_LABELS,
         default=None,
-        description="章节：profile、segment、mda、risk、material、governance、financials、notes",
     )
-    entity: Entity | None = Field(
+    entity: Entity | None = _enum_field(
+        "报表口径。只用于财务报表和附注。不传则不限口径",
+        ENTITY_LABELS,
         default=None,
-        description="报表口径：consolidated 合并，parent 母公司。只用于财务报表和附注",
     )
 
     @field_validator("stock_name", "period")
@@ -110,18 +161,20 @@ class FilingRetrieveRequest(_RequestBase):
 class KnowledgeQueryRequest(KnowledgeRetrieveRequest):
     """POST /knowledge/query。"""
 
-    output: Output | None = Field(
+    output: Output | None = _enum_field(
+        "返回内容。不传则看 llm.enabled：true 相当于 both，false 相当于 hits",
+        OUTPUT_LABELS,
         default=None,
-        description="hits 只返回命中，answer 只返回回答，both 两者都返回。不传则看 llm.enabled",
     )
 
 
 class FilingQueryRequest(FilingRetrieveRequest):
     """POST /financial_report/query。"""
 
-    output: Output | None = Field(
+    output: Output | None = _enum_field(
+        "返回内容。不传则看 llm.enabled：true 相当于 both，false 相当于 hits",
+        OUTPUT_LABELS,
         default=None,
-        description="hits 只返回命中，answer 只返回回答，both 两者都返回。不传则看 llm.enabled",
     )
 
 
@@ -153,17 +206,17 @@ class Hit(BaseModel):
 
 
 class RetrieveResponse(BaseModel):
-    question: str
-    collection: Collection
-    mode: Mode
+    question: str = Field(description="查询问题")
+    collection: Collection = _enum_field("由请求路径决定的语料范围", COLLECTION_LABELS)
+    mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
     hits: list[Hit]
 
 
 class QueryResponse(BaseModel):
-    question: str
-    collection: Collection
-    mode: Mode
-    output: Output
+    question: str = Field(description="查询问题")
+    collection: Collection = _enum_field("由请求路径决定的语料范围", COLLECTION_LABELS)
+    mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
+    output: Output = _enum_field("实际采用的返回内容", OUTPUT_LABELS)
     hits: list[Hit] | None = None
     answer: str | None = None
 
