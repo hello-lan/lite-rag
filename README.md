@@ -21,7 +21,7 @@ corpus/BRK-Annual-Meeting/     伯克希尔股东大会记录
 models/bge-m3/               本地 BGE-M3 模型
 data/                        入库生成的索引：meta.db（financial_report_chunks / knowledge_chunks）、financial_report_bm25.pkl、knowledge_bm25.pkl、chroma/
 config.yaml                  切分、模型、召回条数、大模型
-main.py                      命令行入口：ingest、ingest-split、query、reembed、serve
+main.py                      命令行入口：ingest-split、query-knowledge、query-financial-report、reembed、serve
 api.py                       查询接口：/knowledge、/financial_report 各自的 retrieve 与 query
 lite_rag/                    索引、检索、回答；只导入已切分 JSON
 scripts/                     切分、抽取、采集（年报/互动易等）
@@ -114,14 +114,20 @@ python main.py ingest-split --bm25-only  # 只按 sqlite 重建 BM25
 ## 查询
 
 ```powershell
-python main.py query 2025年毛利率是多少 --scope financial_report
-python main.py query 公司主要风险有哪些 --scope financial_report --mode vector
-python main.py query 分红方案 --scope financial_report --mode bm25 --code 600519 --doc-type filing
-python main.py query 2025年资本开支是多少 --scope financial_report --mode hybrid --top-k 4 --stock-name 贵州茅台 --period 2025 --section financials --entity consolidated
-python main.py query 什么是安全边际 --scope knowledge --doc-type investment_theory --figure 唐朝 --occasion article --year 2018
+python main.py query-financial-report 2025年毛利率是多少
+python main.py query-financial-report 公司主要风险有哪些 --mode vector
+python main.py query-financial-report 分红方案 --mode bm25 --code 600519 --doc-type filing
+python main.py query-financial-report 2025年资本开支是多少 --mode hybrid --top-k 4 --stock-name 贵州茅台 --period 2025 --section financials --entity consolidated
+python main.py query-knowledge 什么是安全边际 --doc-type investment_theory --figure 唐朝 --occasion article --year 2018
 ```
 
-默认打印命中的原文。`--scope` 必填，只能是 `financial_report` 或 `knowledge`。`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。不传 `--doc-type`、`--figure`、`--occasion`、`--stock-name`、`--code`、`--year`、`--period`、`--section`、`--entity` 时，在该范围内搜索全部材料。`--figure` 和 `--occasion` 只用于 `investment_theory`。传入公司或代码后，向量和 BM25 都只保留这家公司。程序不会从问题文本里猜测公司和类型。查询范围包含财报时不能传 `--year`，报告期用 `--period`。`--year` 只用于投资通识。
+`query-financial-report` 查公司材料，`query-knowledge` 查投资通识，筛选参数不共用。两边都支持 `--mode`、`--top-k`、`--output`；`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。
+
+`query-financial-report` 可选 `--doc-type`（`filing`、`ir_qa`、`survey`、`research`、`news`）、`--stock-name`、`--code`、`--period`、`--section`、`--entity`。传入公司或代码后，向量和 BM25 都只保留这家公司。报告期用 `--period`，不要用 `--year`。
+
+`query-knowledge` 可选 `--doc-type`（`investment_theory`、`beginner`）、`--figure`、`--occasion`、`--year`。`--figure` 和 `--occasion` 只用于 `investment_theory`。
+
+不传上述筛选时，在该命令范围内搜索全部材料。程序不会从问题文本里猜测公司和类型。
 
 混合检索时，BM25 和向量各取 `candidate_k` 条（默认 10），再按 RRF 截到 `top_k` 条（默认 4）。RRF 只看名次：`1 / (60 + rank + 1)`，不会把两种分数直接相加。
 
@@ -129,7 +135,7 @@ python main.py query 什么是安全边际 --scope knowledge --doc-type investme
 
 ```powershell
 $env:DEEPSEEK_API_KEY="你的密钥"
-python main.py query 2025年毛利率是多少 --scope financial_report --output both
+python main.py query-financial-report 2025年毛利率是多少 --output both
 ```
 
 `--output` 可以是 `hits`（只打印命中）、`answer`（只打印回答）或 `both`。不传时看 `config.yaml` 里的 `llm.enabled`：`true` 相当于 `both`，`false` 相当于 `hits`。

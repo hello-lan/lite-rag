@@ -10,16 +10,18 @@ from lite_rag.answer import generate_answer
 from lite_rag.config import configure_stdio, load_config
 from lite_rag.ingest import ingest_split_documents, reembed_vectors
 from lite_rag.meta import (
-    DOC_TYPES,
     ENTITIES,
     FIGURES,
     OCCASIONS,
-    SCOPES,
     SECTIONS,
+    TYPES_BY_SCOPE,
     SearchFilter,
     source_label,
 )
 from lite_rag.search import retrieve
+
+_KNOWLEDGE_DOC_TYPES = sorted(TYPES_BY_SCOPE["knowledge"])
+_FINANCIAL_DOC_TYPES = sorted(TYPES_BY_SCOPE["financial_report"])
 
 
 @click.group(help="本地财报 RAG：预切分 JSON 入库、查询、按新模型重算向量、启动查询接口。")
@@ -50,80 +52,7 @@ def print_hits(mode: str, hits: list[dict], filt: SearchFilter | None = None) ->
         print()
 
 
-@cli.command("ingest-split", help="把已切分的 JSON 嵌入并写入索引。默认读取配置里的 paths.split_dir。")
-@click.option("--force", is_flag=True, help="即使文本和元信息没变，也重新嵌入并写入")
-@click.option("--check", is_flag=True, help="只校验 JSON，不下载模型，也不写数据库")
-@click.option("--bm25-only", is_flag=True, help="不读 JSON，只按 sqlite 里的原文重建 BM25")
-@click.option(
-    "--dir",
-    "split_dir",
-    default=None,
-    type=click.Path(file_okay=False, path_type=Path),
-    help="本次读取的 JSON 目录。相对路径相对项目根目录。不传则使用 paths.split_dir",
-)
-def ingest_split(force: bool, check: bool, bm25_only: bool, split_dir: Path | None) -> None:
-    cfg = load_config()
-    ingest_split_documents(
-        cfg, force=force, check=check, bm25_only=bm25_only, split_dir=split_dir
-    )
-
-
-@cli.command(help="按 BM25、向量或 RRF 混合检索财报 chunk，可选调用大模型生成回答。")
-@click.argument("question", nargs=-1, required=True)
-@click.option("--mode", type=click.Choice(["hybrid", "bm25", "vector"]), help="覆盖 config.yaml 里的检索模式")
-@click.option("--top-k", type=click.IntRange(min=1), help="最终返回的 chunk 数")
-@click.option(
-    "--output",
-    type=click.Choice(["hits", "answer", "both"]),
-    help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印。不传则按 llm.enabled 选择 hits 或 both",
-)
-@click.option("--scope", type=click.Choice(list(SCOPES)), required=True, help="查询范围：financial_report 公司材料，knowledge 投资通识")
-@click.option("--doc-type", type=click.Choice(list(DOC_TYPES)), help="材料类型：filing、ir_qa、survey、research、news、investment_theory、beginner")
-@click.option("--figure", type=click.Choice(list(FIGURES)), default=None, help="投资理论的主要人物：唐朝，buffett 巴菲特，munger 芒格")
-@click.option("--occasion", type=click.Choice(list(OCCASIONS)), default=None, help="投资理论的场合：letter 致投资者的信，meeting 股东大会，speech 演讲，article 文章")
-@click.option("--stock-name", "stock_name", default=None, help="股票简称，精确匹配")
-@click.option("--code", "stock_code", default=None, help="6 位股票代码")
-@click.option("--year", type=click.IntRange(1900, 2100), help="投资通识的年份。查询范围包含财报时请改用 --period")
-@click.option("--period", default=None, help="财报报告期，如 2024、2024Q1、2024H1。累计口径")
-@click.option("--section", type=click.Choice(list(SECTIONS)), default=None, help="财报章节：profile、segment、mda、risk、material、governance、financials、notes")
-@click.option("--entity", type=click.Choice(list(ENTITIES)), default=None, help="报表口径：consolidated 合并，parent 母公司。只用于财务报表和附注")
-def query(
-    question: tuple[str, ...],
-    mode: str | None,
-    top_k: int | None,
-    output: str | None,
-    scope: str,
-    doc_type: str | None,
-    stock_name: str | None,
-    stock_code: str | None,
-    year: int | None,
-    period: str | None,
-    section: str | None,
-    entity: str | None,
-    figure: str | None,
-    occasion: str | None,
-) -> None:
-    cfg = load_config()
-    if mode:
-        cfg["retrieval"]["mode"] = mode
-    if top_k is not None:
-        cfg["retrieval"]["top_k"] = top_k
-
-    text = " ".join(question).strip()
-    if not text:
-        raise click.UsageError("问题不能为空")
-    filt = SearchFilter.parse(
-        scope=scope,
-        doc_type=doc_type,
-        stock_name=stock_name,
-        stock_code=stock_code,
-        year=year,
-        period=period,
-        section=section,
-        entity=entity,
-        figure=figure,
-        occasion=occasion,
-    )
+def _run_query(cfg: dict, text: str, filt: SearchFilter, output: str | None) -> None:
     hits = retrieve(
         cfg,
         text,
@@ -145,6 +74,147 @@ def query(
     if output in ("answer", "both"):
         print("回答:")
         print(generate_answer(cfg, text, hits))
+
+
+def _prepare_cfg(mode: str | None, top_k: int | None) -> dict:
+    cfg = load_config()
+    if mode:
+        cfg["retrieval"]["mode"] = mode
+    if top_k is not None:
+        cfg["retrieval"]["top_k"] = top_k
+    return cfg
+
+
+def _question_text(question: tuple[str, ...]) -> str:
+    text = " ".join(question).strip()
+    if not text:
+        raise click.UsageError("问题不能为空")
+    return text
+
+
+_MODE_OPTION = click.option(
+    "--mode", type=click.Choice(["hybrid", "bm25", "vector"]), help="覆盖 config.yaml 里的检索模式"
+)
+_TOP_K_OPTION = click.option("--top-k", type=click.IntRange(min=1), help="最终返回的 chunk 数")
+_OUTPUT_OPTION = click.option(
+    "--output",
+    type=click.Choice(["hits", "answer", "both"]),
+    help="返回内容：hits 只打印检索结果，answer 只打印生成回复，both 两者都打印。不传则按 llm.enabled 选择 hits 或 both",
+)
+
+
+@cli.command("ingest-split", help="把已切分的 JSON 嵌入并写入索引。默认读取配置里的 paths.split_dir。")
+@click.option("--force", is_flag=True, help="即使文本和元信息没变，也重新嵌入并写入")
+@click.option("--check", is_flag=True, help="只校验 JSON，不下载模型，也不写数据库")
+@click.option("--bm25-only", is_flag=True, help="不读 JSON，只按 sqlite 里的原文重建 BM25")
+@click.option(
+    "--dir",
+    "split_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="本次读取的 JSON 目录。相对路径相对项目根目录。不传则使用 paths.split_dir",
+)
+def ingest_split(force: bool, check: bool, bm25_only: bool, split_dir: Path | None) -> None:
+    cfg = load_config()
+    ingest_split_documents(
+        cfg, force=force, check=check, bm25_only=bm25_only, split_dir=split_dir
+    )
+
+
+@cli.command("query-knowledge", help="检索投资通识 chunk，可选调用大模型生成回答。")
+@click.argument("question", nargs=-1, required=True)
+@_MODE_OPTION
+@_TOP_K_OPTION
+@_OUTPUT_OPTION
+@click.option(
+    "--doc-type",
+    type=click.Choice(_KNOWLEDGE_DOC_TYPES),
+    help="材料类型：investment_theory、beginner",
+)
+@click.option(
+    "--figure",
+    type=click.Choice(list(FIGURES)),
+    default=None,
+    help="投资理论的主要人物：唐朝，buffett 巴菲特，munger 芒格",
+)
+@click.option(
+    "--occasion",
+    type=click.Choice(list(OCCASIONS)),
+    default=None,
+    help="投资理论的场合：letter 致投资者的信，meeting 股东大会，speech 演讲，article 文章",
+)
+@click.option("--year", type=click.IntRange(1900, 2100), help="年份")
+def query_knowledge(
+    question: tuple[str, ...],
+    mode: str | None,
+    top_k: int | None,
+    output: str | None,
+    doc_type: str | None,
+    figure: str | None,
+    occasion: str | None,
+    year: int | None,
+) -> None:
+    cfg = _prepare_cfg(mode, top_k)
+    text = _question_text(question)
+    filt = SearchFilter.parse(
+        scope="knowledge",
+        doc_type=doc_type,
+        figure=figure,
+        occasion=occasion,
+        year=year,
+    )
+    _run_query(cfg, text, filt, output)
+
+
+@cli.command("query-financial-report", help="检索公司材料 chunk，可选调用大模型生成回答。")
+@click.argument("question", nargs=-1, required=True)
+@_MODE_OPTION
+@_TOP_K_OPTION
+@_OUTPUT_OPTION
+@click.option(
+    "--doc-type",
+    type=click.Choice(_FINANCIAL_DOC_TYPES),
+    help="材料类型：filing、ir_qa、survey、research、news",
+)
+@click.option("--stock-name", "stock_name", default=None, help="股票简称，精确匹配")
+@click.option("--code", "stock_code", default=None, help="6 位股票代码")
+@click.option("--period", default=None, help="报告期，如 2024、2024Q1、2024H1。累计口径")
+@click.option(
+    "--section",
+    type=click.Choice(list(SECTIONS)),
+    default=None,
+    help="章节：profile、segment、mda、risk、material、governance、financials、notes",
+)
+@click.option(
+    "--entity",
+    type=click.Choice(list(ENTITIES)),
+    default=None,
+    help="报表口径：consolidated 合并，parent 母公司。只用于财务报表和附注",
+)
+def query_financial_report(
+    question: tuple[str, ...],
+    mode: str | None,
+    top_k: int | None,
+    output: str | None,
+    doc_type: str | None,
+    stock_name: str | None,
+    stock_code: str | None,
+    period: str | None,
+    section: str | None,
+    entity: str | None,
+) -> None:
+    cfg = _prepare_cfg(mode, top_k)
+    text = _question_text(question)
+    filt = SearchFilter.parse(
+        scope="financial_report",
+        doc_type=doc_type,
+        stock_name=stock_name,
+        stock_code=stock_code,
+        period=period,
+        section=section,
+        entity=entity,
+    )
+    _run_query(cfg, text, filt, output)
 
 
 @cli.command(help="启动查询接口，和 python api.py 是同一个服务。")
