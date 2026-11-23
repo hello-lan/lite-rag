@@ -1,20 +1,4 @@
-# 财报 RAG 本地配置。改切分或 embedding 后，用对应脚本重跑，不必改代码。
-
-split:
-  version: "v2"
-  chunk_size: 1000
-  chunk_overlap: 200
-  # 滑窗时把 Markdown 表当特殊块：整表保留或按行切并重复表头
-  table_aware: true
-  # 中文财报按句号、分号再切开，避免把一整段指标切碎
-  separators:
-    - "\n\n"
-    - "\n"
-    - "。"
-    - "；"
-    - "，"
-    - " "
-    - ""
+# 财报 RAG 本地配置（检索 / 嵌入 / 路径）。切分参数在业务脚本里，不在这里。
 
 embedding:
   version: "bge-m3-v1"
@@ -22,7 +6,7 @@ embedding:
   model_name: "models/bge-m3"
   # 显存或内存紧张、只想先跑通流程时，可改成 BAAI/bge-small-zh-v1.5
   batch_size: 8
-  # 与 chunk_size 对齐。BGE-M3 最长可到 8192，CPU 上会明显变慢
+  # BGE-M3 最长可到 8192，CPU 上会明显变慢；需大于业务切分脚本的 chunk 上限
   max_seq_length: 1024
   normalize: true
   # BGE-M3 稠密检索不需要查询指令前缀

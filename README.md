@@ -64,12 +64,12 @@ python main.py ingest-split --check
 
 ## 采集
 
-问答先写成 Markdown，再由业务脚本切成 JSON 后 `ingest-split`。采集脚本共用代码列表、文本清洗和写出，站点解析各自保留。默认分别写到 `corpus/raw/sse` 和 `corpus/raw/irm`；也可用 `--output` 指到 `corpus/02_processed/financial_report/ir_qa`。
+问答先写成 Markdown，再由业务脚本切成 JSON 后 `ingest-split`。`scripts/crawl_qa.py` 按代码自动分流（0/3→互动易，6→上证e互动），默认分别写到 `corpus/raw/irm` 和 `corpus/raw/sse`；也可用 `--output` 指到 `corpus/02_processed/financial_report/ir_qa`。
 
 ```powershell
-python scripts/crawl_sse.py --code 600519
-python scripts/crawl_irm.py --code 000001
-python scripts/crawl_sse.py --code 600519 --output corpus/02_processed/financial_report/ir_qa
+python scripts/crawl_qa.py --code 600519
+python scripts/crawl_qa.py --code 000001
+python scripts/crawl_qa.py --code 600519 --output corpus/02_processed/financial_report/ir_qa
 ```
 
 ## 入库（只导入已切分 JSON）
@@ -78,7 +78,7 @@ python scripts/crawl_sse.py --code 600519 --output corpus/02_processed/financial
 
 一个 JSON 文件对应一份逻辑文档，可以放在 `corpus/03_splited/` 的任意子目录里。类型以文件里的 `meta` 为准，不看子目录名字。
 
-`meta` 里 `scope` 和 `doc_type` 必填，其余可以不写。单条 chunk 可以改自己的年份、日期或其他字段，没写的继承文档级 `meta`。`split` 用来标记这套切分；不写时记为 `external`。改 `config.yaml` 里的 `chunk_size` 不会自动重算这些 chunk——需要先重跑对应切分脚本，再 `ingest-split`。
+`meta` 里 `scope` 和 `doc_type` 必填，其余可以不写。单条 chunk 可以改自己的年份、日期或其他字段，没写的继承文档级 `meta`。`split` 用来标记这套切分；不写时记为 `external`。切分参数在业务脚本里（如 `CHUNK_SIZE`），改完后需重跑对应脚本再 `ingest-split`。
 
 `scope` 只能是 `financial_report` 或 `knowledge`；`doc_type` 在公司侧是 `filing`、`ir_qa`、`survey`、`research`、`news`，在通识侧是 `investment_theory`、`beginner`。`investment_theory` 还要写 `figure` 和 `occasion`：`figure` 是 `唐朝`、`buffett`（巴菲特）、`munger`（芒格）；`occasion` 是 `letter`（致投资者的信）、`meeting`（股东大会）、`speech`（演讲）、`article`（文章）。
 

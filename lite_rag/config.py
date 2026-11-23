@@ -58,10 +58,6 @@ def load_config() -> dict:
         raise SystemExit(f"配置文件不是合法的 YAML 映射: {cfg_path}")
     cfg["_root"] = cfg_path.parent.resolve()
     cfg["_config_path"] = cfg_path.resolve()
-    overlap = int(cfg["split"]["chunk_overlap"])
-    size = int(cfg["split"]["chunk_size"])
-    if overlap >= size:
-        raise SystemExit("split.chunk_overlap 必须小于 split.chunk_size")
     mode = cfg["retrieval"]["mode"]
     if mode not in {"hybrid", "bm25", "vector"}:
         raise SystemExit("retrieval.mode 只能是 hybrid、bm25 或 vector")
@@ -83,11 +79,3 @@ def resolve_path(cfg: dict, relative: str | Path) -> Path:
     if path.is_absolute():
         return path
     return cfg["_root"] / path
-
-
-def split_config_of(cfg: dict) -> str:
-    split = cfg["split"]
-    return (
-        f"{split['version']}:chunk_size={int(split['chunk_size'])},"
-        f"overlap={int(split['chunk_overlap'])}"
-    )

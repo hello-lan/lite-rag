@@ -1,6 +1,6 @@
 """把 corpus/tangchao 的 Markdown 切成预切分 JSON，再交给 ingest-split 写入索引。
 
-切分在本脚本完成（scripts.text_split）；lite_rag 只导入 JSON。
+切分在本脚本完成；lite_rag 只导入 JSON。
 文稿记为投资理论（knowledge/investment_theory），人物唐朝，场合文章。
 标题和发布日期从文件名解析。图片、image_texts.json 和压缩包不处理。
 
@@ -27,16 +27,286 @@ if str(ROOT) not in sys.path:
 
 from lite_rag.config import configure_stdio, load_config, resolve_path
 from lite_rag.ingest import ingest_split_documents
-from scripts.extract_text import iter_source_files, md_to_text
-from scripts.text_split import split_document
 
 log = logging.getLogger("tangchao")
 
 SPLIT_NAME = "tangchao-md-v1"
 SOURCE_DIR = ROOT / "corpus" / "tangchao"
+SUPPORTED_SUFFIXES = {".pdf", ".md", ".markdown"}
+
+# 滑窗参数（lite_rag 不再切分，改这里后需重跑本脚本）
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+TABLE_AWARE = True
+SEPARATORS = ["\n\n", "\n", "。", "；", "，", " ", ""]
 _INDEX = re.compile(r"^\d+\s*[-–—.]?\s*")
 _DATE = re.compile(r"(20\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})")
 _EDGE = " \t-–—.．"
+
+_MD_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_MD_TABLE_SEP = re.compile(r"^\s*\|(\s*:?-{3,}:?\s*\|)+\s*$")
+_TABLE_CAPTION = re.compile(r"(单位|注[:：]|备注|说明)")
+
+
+def _is_md_table_row(line: str) -> bool:
+    return bool(_MD_TABLE_ROW.match(line))
+
+
+def _is_md_table_sep(line: str) -> bool:
+    return bool(_MD_TABLE_SEP.match(line))
+
+
+def _looks_like_table_caption(line: str) -> bool:
+    text = (line or "").strip()
+    if not text or _is_md_table_row(text):
+        return False
+    if len(text) > 80:
+        return False
+    return bool(_TABLE_CAPTION.search(text))
+
+
+def _find_md_table_end(plain: list[str], start: int) -> int | None:
+    """若 plain[start] 起是合法 Markdown 表，返回表结束后的下标；否则 None。"""
+    if start >= len(plain) or not _is_md_table_row(plain[start]):
+        return None
+    index = start
+    saw_sep = False
+    while index < len(plain) and (
+        _is_md_table_row(plain[index]) or _is_md_table_sep(plain[index])
+    ):
+        if _is_md_table_sep(plain[index]):
+            saw_sep = True
+        index += 1
+    if saw_sep and index - start >= 2:
+        return index
+    return None
+
+
+def _peel_trailing_captions(prose: str) -> tuple[str, str]:
+    """把 prose 末尾紧邻的单位/注说明剥给表格。返回 (剩余正文, 说明)。"""
+    lines = prose.splitlines(keepends=True)
+    keep = len(lines)
+    while keep > 0 and _looks_like_table_caption(lines[keep - 1].rstrip("\r\n")):
+        keep -= 1
+    if keep == len(lines):
+        return prose, ""
+    left = "".join(lines[:keep]).strip("\n")
+    caption = "".join(lines[keep:]).strip("\n")
+    return left, caption
+
+
+def partition_prose_and_tables(text: str) -> list[tuple[str, str]]:
+    """拆成 (kind, content) 块；kind 为 prose 或 table。表前短单位/注说明吸附到表。"""
+    if not (text or "").strip():
+        return []
+
+    lines = text.splitlines(keepends=True)
+    plain = [line.rstrip("\r\n") for line in lines]
+    n = len(plain)
+    blocks: list[tuple[str, str]] = []
+    index = 0
+
+    def emit(kind: str, start: int, end: int) -> None:
+        if start >= end:
+            return
+        chunk = "".join(lines[start:end]).strip("\n")
+        if chunk.strip():
+            blocks.append((kind, chunk))
+
+    while index < n:
+        table_end = _find_md_table_end(plain, index)
+        if table_end is not None:
+            table_body = "".join(lines[index:table_end]).strip("\n")
+            if blocks and blocks[-1][0] == "prose":
+                left, caption = _peel_trailing_captions(blocks[-1][1])
+                if caption:
+                    if left.strip():
+                        blocks[-1] = ("prose", left)
+                    else:
+                        blocks.pop()
+                    table_body = f"{caption}\n{table_body}"
+            blocks.append(("table", table_body))
+            index = table_end
+            continue
+
+        start = index
+        index += 1
+        while index < n and _find_md_table_end(plain, index) is None:
+            if _is_md_table_row(plain[index]):
+                # 单行管道文本但构不成表：当正文吃掉，避免卡死。
+                index += 1
+                continue
+            index += 1
+        emit("prose", start, index)
+
+    return blocks
+
+
+def chunk_markdown_table(table_text: str, chunk_size: int) -> list[str]:
+    """小表整表保留；大表按行分包，每块重复 header + separator。"""
+    text = (table_text or "").strip()
+    if not text:
+        return []
+    if len(text) <= chunk_size:
+        return [text]
+
+    lines = text.splitlines()
+    caption_lines: list[str] = []
+    cursor = 0
+    while cursor < len(lines) and not _is_md_table_row(lines[cursor]):
+        caption_lines.append(lines[cursor])
+        cursor += 1
+    table_lines = lines[cursor:]
+    if len(table_lines) < 2:
+        return [text]
+
+    header = table_lines[0]
+    separator = table_lines[1] if _is_md_table_sep(table_lines[1]) else None
+    body_start = 2 if separator is not None else 1
+    if separator is None:
+        return [text] if len(text) <= chunk_size else _chunk_lines_fit(lines, chunk_size)
+
+    body_rows = table_lines[body_start:]
+    prefix_parts = caption_lines + [header, separator]
+    prefix = "\n".join(prefix_parts)
+    prefix_len = len(prefix)
+
+    if not body_rows:
+        return [text]
+
+    chunks: list[str] = []
+    batch: list[str] = []
+    batch_len = prefix_len
+
+    def flush() -> None:
+        nonlocal batch, batch_len
+        if not batch:
+            return
+        chunks.append("\n".join(prefix_parts + batch))
+        batch = []
+        batch_len = prefix_len
+
+    for row in body_rows:
+        row_cost = 1 + len(row)
+        if batch and batch_len + row_cost > chunk_size:
+            flush()
+        if not batch and prefix_len + 1 + len(row) > chunk_size:
+            chunks.append("\n".join(prefix_parts + [row]))
+            batch = []
+            batch_len = prefix_len
+            continue
+        batch.append(row)
+        batch_len += row_cost
+    flush()
+    return chunks
+
+
+def _chunk_lines_fit(lines: list[str], chunk_size: int) -> list[str]:
+    chunks: list[str] = []
+    batch: list[str] = []
+    size = 0
+    for line in lines:
+        cost = len(line) + (1 if batch else 0)
+        if batch and size + cost > chunk_size:
+            chunks.append("\n".join(batch))
+            batch = []
+            size = 0
+            cost = len(line)
+        batch.append(line)
+        size += cost
+    if batch:
+        chunks.append("\n".join(batch))
+    return chunks
+
+
+def _split_prose(text: str) -> list[str]:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    kwargs = dict(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=list(SEPARATORS),
+        length_function=len,
+    )
+    try:
+        splitter = RecursiveCharacterTextSplitter(keep_separator=True, **kwargs)
+    except TypeError:
+        splitter = RecursiveCharacterTextSplitter(**kwargs)
+    return [part.strip() for part in splitter.split_text(text) if part and part.strip()]
+
+
+def split_document(text: str) -> list[str]:
+    """切分正文；默认表感知：Markdown 表整表或按行切并重复表头。"""
+    body = (text or "").strip()
+    if not body:
+        return []
+
+    if not TABLE_AWARE:
+        return _split_prose(body)
+
+    parts: list[str] = []
+    for kind, content in partition_prose_and_tables(body):
+        if kind == "table":
+            parts.extend(chunk_markdown_table(content, CHUNK_SIZE))
+        else:
+            parts.extend(_split_prose(content))
+    return parts
+
+
+def iter_source_files(docs_dir: Path, *, suffixes: set[str] | None = None) -> list[Path]:
+    wanted = {item.lower() for item in (suffixes or SUPPORTED_SUFFIXES)}
+    if not docs_dir.exists():
+        return []
+    files = [
+        path
+        for path in docs_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in wanted
+    ]
+    return sorted(files, key=lambda path: path.as_posix().lower())
+
+
+def md_to_text(src: str) -> str:
+    import marko
+    from marko.ext.gfm import GFM
+
+    document = marko.Markdown(extensions=[GFM]).parse(src)
+    return _render_markdown(document).strip()
+
+
+def _render_markdown(node) -> str:
+    if isinstance(node, str):
+        return node
+    name = type(node).__name__
+    children = getattr(node, "children", None)
+    if name == "TableRow" and children and not isinstance(children, str):
+        cells = [_render_markdown(child).strip() for child in children]
+        return " | ".join(cell for cell in cells if cell) + "\n"
+    if children is None:
+        return ""
+    inner = children if isinstance(children, str) else "".join(_render_markdown(child) for child in children)
+    if name == "Link":
+        dest = getattr(node, "dest", "") or ""
+        if dest and dest not in inner:
+            return f"{inner} ({dest})"
+        return inner
+    if name == "ListItem":
+        return "- " + inner.strip() + "\n"
+    if name == "TableCell":
+        return inner.strip()
+    if name in {"Paragraph", "Heading", "Quote", "FencedCode", "CodeBlock", "BlankLine", "ThematicBreak"}:
+        text = inner.strip()
+        return f"{text}\n\n" if text else "\n"
+    if name in {"List", "Table", "TableHead", "TableBody"}:
+        return inner + ("\n" if inner and not inner.endswith("\n") else "")
+    return inner
+
+
+def pdf_to_text(path: Path) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(path))
+    pages = [(page.extract_text() or "").strip() for page in reader.pages]
+    return "\n\n".join(page for page in pages if page).strip()
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +369,7 @@ def json_path(out_dir: Path, source: Path) -> Path:
 def write_article(cfg: dict, out_dir: Path, source: Path) -> tuple[dict, int]:
     raw = source.read_text(encoding="utf-8-sig")
     text = md_to_text(raw)
-    chunks = split_document(text, cfg) if text else []
+    chunks = split_document(text) if text else []
     meta = article_meta(source.stem)
     if not chunks:
         log.warning("跳过（没有抽出文本）: %s", source.name)
