@@ -7,7 +7,7 @@ import copy
 import json
 import threading
 from contextlib import asynccontextmanager
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 import uvicorn
@@ -31,7 +31,6 @@ from lite_rag.store import get_model, keep_model_loaded, model_is_loaded, releas
 
 Mode = Literal["hybrid", "bm25", "vector"]
 Output = Literal["hits", "answer", "both"]
-Collection = Literal["knowledge", "financial_report"]
 TheoryType = Literal["investment_theory"]
 Figure = Literal["唐朝", "buffett", "munger"]
 Occasion = Literal["letter", "meeting", "speech", "article"]
@@ -77,6 +76,68 @@ class UTF8JSONResponse(JSONResponse):
         return json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
+class _HitBase(BaseModel):
+    rank: int
+    id: int
+    source_name: str
+    source_path: str
+    chunk_idx: int
+    chunk_text: str
+    score: float | None
+    score_name: str
+    scope: str
+    doc_type: str
+    title: str
+
+
+class KnowledgeHit(_HitBase):
+    year: int
+    figure: str = ""
+    occasion: str = ""
+
+
+class FilingHit(_HitBase):
+    stock_name: str
+    stock_code: str
+    period: str
+    published_on: str
+    section: str = ""
+    entity: str = ""
+
+
+_KNOWLEDGE_HIT_KEYS = tuple(KnowledgeHit.model_fields)
+_FILING_HIT_KEYS = tuple(FilingHit.model_fields)
+_KNOWLEDGE_HIT_KEY_SET = frozenset(_KNOWLEDGE_HIT_KEYS)
+_FILING_HIT_KEY_SET = frozenset(_FILING_HIT_KEYS)
+KnowledgeHitField = Literal[*_KNOWLEDGE_HIT_KEYS]
+FilingHitField = Literal[*_FILING_HIT_KEYS]
+
+
+def _normalize_hit_fields(value: list[str] | None, allowed: frozenset[str]) -> list[str] | None:
+    if value is None:
+        return None
+    if not value:
+        raise ValueError("至少指定一个字段")
+    unknown = sorted({name for name in value if name not in allowed})
+    if unknown:
+        raise ValueError("不支持的字段: " + "、".join(unknown))
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in value:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    return ordered
+
+
+def _project_hits(hits: list[dict], keys: Sequence[str]) -> list[dict]:
+    return [{key: hit[key] for key in keys if key in hit} for hit in hits]
+
+
+def _hit_keys(requested: list[str] | None, all_keys: Sequence[str]) -> Sequence[str]:
+    return requested if requested is not None else all_keys
+
+
 class _RequestBase(BaseModel):
     """检索请求的公共字段。未传的可选项继续使用 config.yaml。"""
 
@@ -118,6 +179,16 @@ class KnowledgeRetrieveRequest(_RequestBase):
         default=None,
     )
     year: StrictInt | None = Field(default=None, ge=1900, le=2100, description="年份。不传则不限年份")
+    hit_fields: list[KnowledgeHitField] | None = Field(
+        default=None,
+        description="要返回的 hit 字段。不传则返回全部；传入则每条 hit 只保留名单中的键",
+        min_length=1,
+    )
+
+    @field_validator("hit_fields")
+    @classmethod
+    def knowledge_hit_fields(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_hit_fields(value, _KNOWLEDGE_HIT_KEY_SET)
 
 
 class FilingRetrieveRequest(_RequestBase):
@@ -135,6 +206,11 @@ class FilingRetrieveRequest(_RequestBase):
         "报表口径。只用于财务报表和附注。不传则不限口径",
         ENTITY_LABELS,
         default=None,
+    )
+    hit_fields: list[FilingHitField] | None = Field(
+        default=None,
+        description="要返回的 hit 字段。不传则返回全部；传入则每条 hit 只保留名单中的键",
+        min_length=1,
     )
 
     @field_validator("stock_name", "period")
@@ -156,6 +232,11 @@ class FilingRetrieveRequest(_RequestBase):
         if len(text) != 6 or not text.isdigit():
             raise ValueError("需要是 6 位数字")
         return text
+
+    @field_validator("hit_fields")
+    @classmethod
+    def filing_hit_fields(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_hit_fields(value, _FILING_HIT_KEY_SET)
 
 
 class KnowledgeQueryRequest(KnowledgeRetrieveRequest):
@@ -182,42 +263,54 @@ RetrieveBody = KnowledgeRetrieveRequest | FilingRetrieveRequest
 QueryBody = KnowledgeQueryRequest | FilingQueryRequest
 
 
-class Hit(BaseModel):
-    rank: int
-    id: int
-    source_name: str
-    source_path: str
-    chunk_idx: int
-    chunk_text: str
-    score: float | None
-    score_name: str
-    scope: str
-    doc_type: str
-    title: str
-    stock_name: str
-    stock_code: str
-    year: int
-    period: str
-    published_on: str
-    section: str = ""
-    entity: str = ""
-    figure: str = ""
-    occasion: str = ""
+_KNOWLEDGE_COLLECTION = {"knowledge": COLLECTION_LABELS["knowledge"]}
+_FILING_COLLECTION = {"financial_report": COLLECTION_LABELS["financial_report"]}
 
 
-class RetrieveResponse(BaseModel):
+class KnowledgeRetrieveResponse(BaseModel):
     question: str = Field(description="查询问题")
-    collection: Collection = _enum_field("由请求路径决定的语料范围", COLLECTION_LABELS)
+    collection: Literal["knowledge"] = _enum_field("由请求路径决定的语料范围", _KNOWLEDGE_COLLECTION)
     mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
-    hits: list[Hit]
+    hits: list[KnowledgeHit] = Field(description="命中列表。请求传了 hit_fields 时每条只含名单中的键")
 
 
-class QueryResponse(BaseModel):
+class FilingRetrieveResponse(BaseModel):
     question: str = Field(description="查询问题")
-    collection: Collection = _enum_field("由请求路径决定的语料范围", COLLECTION_LABELS)
+    collection: Literal["financial_report"] = _enum_field("由请求路径决定的语料范围", _FILING_COLLECTION)
+    mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
+    hits: list[FilingHit] = Field(description="命中列表。请求传了 hit_fields 时每条只含名单中的键")
+
+
+class KnowledgeQueryResponse(BaseModel):
+    question: str = Field(description="查询问题")
+    collection: Literal["knowledge"] = _enum_field("由请求路径决定的语料范围", _KNOWLEDGE_COLLECTION)
     mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
     output: Output = _enum_field("实际采用的返回内容", OUTPUT_LABELS)
-    hits: list[Hit] | None = None
+    hits: list[KnowledgeHit] | None = Field(
+        default=None,
+        description="命中列表。请求传了 hit_fields 时每条只含名单中的键",
+    )
+    answer: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unused(self, handler):
+        data = handler(self)
+        if self.hits is None:
+            data.pop("hits", None)
+        if self.answer is None:
+            data.pop("answer", None)
+        return data
+
+
+class FilingQueryResponse(BaseModel):
+    question: str = Field(description="查询问题")
+    collection: Literal["financial_report"] = _enum_field("由请求路径决定的语料范围", _FILING_COLLECTION)
+    mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
+    output: Output = _enum_field("实际采用的返回内容", OUTPUT_LABELS)
+    hits: list[FilingHit] | None = Field(
+        default=None,
+        description="命中列表。请求传了 hit_fields 时每条只含名单中的键",
+    )
     answer: str | None = None
 
     @model_serializer(mode="wrap")
@@ -298,46 +391,103 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
             return body.output
         return "both" if cfg["llm"].get("enabled") else "hits"
 
-    def _retrieve_response(body: RetrieveBody, collection: Collection) -> RetrieveResponse:
+    def _knowledge_retrieve_response(body: KnowledgeRetrieveRequest) -> UTF8JSONResponse:
         cfg = _prepare(body)
+        keys = _hit_keys(body.hit_fields, _KNOWLEDGE_HIT_KEYS)
         with query_lock:
-            hits = _retrieve_hits(cfg, body)
-        return RetrieveResponse(
-            question=body.question,
-            collection=collection,
-            mode=cfg["retrieval"]["mode"],
-            hits=hits,
+            hits = _project_hits(_retrieve_hits(cfg, body), keys)
+        return UTF8JSONResponse(
+            content={
+                "question": body.question,
+                "collection": "knowledge",
+                "mode": cfg["retrieval"]["mode"],
+                "hits": hits,
+            }
         )
 
-    def _query_response(body: QueryBody, collection: Collection) -> QueryResponse | JSONResponse:
+    def _filing_retrieve_response(body: FilingRetrieveRequest) -> UTF8JSONResponse:
+        cfg = _prepare(body)
+        keys = _hit_keys(body.hit_fields, _FILING_HIT_KEYS)
+        with query_lock:
+            hits = _project_hits(_retrieve_hits(cfg, body), keys)
+        return UTF8JSONResponse(
+            content={
+                "question": body.question,
+                "collection": "financial_report",
+                "mode": cfg["retrieval"]["mode"],
+                "hits": hits,
+            }
+        )
+
+    def _knowledge_query_response(body: KnowledgeQueryRequest) -> UTF8JSONResponse:
         cfg = _prepare(body)
         chosen = _chosen_output(body, cfg)
+        keys = _hit_keys(body.hit_fields, _KNOWLEDGE_HIT_KEYS)
         with query_lock:
-            hits = _retrieve_hits(cfg, body)
+            raw_hits = _retrieve_hits(cfg, body)
+            hits = _project_hits(raw_hits, keys)
             answer = None
             if chosen in ("answer", "both"):
                 try:
-                    answer = generate_answer(cfg, body.question, hits)
+                    answer = generate_answer(cfg, body.question, raw_hits)
                 except SystemExit as exc:
                     return UTF8JSONResponse(
                         status_code=502,
                         content={
                             "detail": _exit_message(exc),
-                            "collection": collection,
+                            "collection": "knowledge",
                             "mode": cfg["retrieval"]["mode"],
                             "output": chosen,
                             "hits": hits,
                         },
                     )
 
-        return QueryResponse(
-            question=body.question,
-            collection=collection,
-            mode=cfg["retrieval"]["mode"],
-            output=chosen,
-            hits=None if chosen == "answer" else hits,
-            answer=answer if chosen in ("answer", "both") else None,
-        )
+        content: dict[str, Any] = {
+            "question": body.question,
+            "collection": "knowledge",
+            "mode": cfg["retrieval"]["mode"],
+            "output": chosen,
+        }
+        if chosen != "answer":
+            content["hits"] = hits
+        if chosen in ("answer", "both"):
+            content["answer"] = answer
+        return UTF8JSONResponse(content=content)
+
+    def _filing_query_response(body: FilingQueryRequest) -> UTF8JSONResponse:
+        cfg = _prepare(body)
+        chosen = _chosen_output(body, cfg)
+        keys = _hit_keys(body.hit_fields, _FILING_HIT_KEYS)
+        with query_lock:
+            raw_hits = _retrieve_hits(cfg, body)
+            hits = _project_hits(raw_hits, keys)
+            answer = None
+            if chosen in ("answer", "both"):
+                try:
+                    answer = generate_answer(cfg, body.question, raw_hits)
+                except SystemExit as exc:
+                    return UTF8JSONResponse(
+                        status_code=502,
+                        content={
+                            "detail": _exit_message(exc),
+                            "collection": "financial_report",
+                            "mode": cfg["retrieval"]["mode"],
+                            "output": chosen,
+                            "hits": hits,
+                        },
+                    )
+
+        content: dict[str, Any] = {
+            "question": body.question,
+            "collection": "financial_report",
+            "mode": cfg["retrieval"]["mode"],
+            "output": chosen,
+        }
+        if chosen != "answer":
+            content["hits"] = hits
+        if chosen in ("answer", "both"):
+            content["answer"] = answer
+        return UTF8JSONResponse(content=content)
 
     @app.get("/health")
     def health() -> dict:
@@ -349,21 +499,21 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
             "model_loaded": model_is_loaded(),
         }
 
-    @app.post("/knowledge/retrieve", response_model=RetrieveResponse)
-    def retrieve_knowledge(body: KnowledgeRetrieveRequest) -> RetrieveResponse:
-        return _retrieve_response(body, "knowledge")
+    @app.post("/knowledge/retrieve", response_model=KnowledgeRetrieveResponse)
+    def retrieve_knowledge(body: KnowledgeRetrieveRequest) -> UTF8JSONResponse:
+        return _knowledge_retrieve_response(body)
 
-    @app.post("/knowledge/query", response_model=QueryResponse)
-    def query_knowledge(body: KnowledgeQueryRequest) -> QueryResponse | JSONResponse:
-        return _query_response(body, "knowledge")
+    @app.post("/knowledge/query", response_model=KnowledgeQueryResponse)
+    def query_knowledge(body: KnowledgeQueryRequest) -> UTF8JSONResponse:
+        return _knowledge_query_response(body)
 
-    @app.post("/financial_report/retrieve", response_model=RetrieveResponse)
-    def retrieve_financial_report(body: FilingRetrieveRequest) -> RetrieveResponse:
-        return _retrieve_response(body, "financial_report")
+    @app.post("/financial_report/retrieve", response_model=FilingRetrieveResponse)
+    def retrieve_financial_report(body: FilingRetrieveRequest) -> UTF8JSONResponse:
+        return _filing_retrieve_response(body)
 
-    @app.post("/financial_report/query", response_model=QueryResponse)
-    def query_financial_report(body: FilingQueryRequest) -> QueryResponse | JSONResponse:
-        return _query_response(body, "financial_report")
+    @app.post("/financial_report/query", response_model=FilingQueryResponse)
+    def query_financial_report(body: FilingQueryRequest) -> UTF8JSONResponse:
+        return _filing_query_response(body)
 
     return app
 

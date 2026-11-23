@@ -163,12 +163,14 @@ python main.py serve --host 127.0.0.1 --port 8100
 
 `/knowledge/retrieve` 和 `/financial_report/retrieve` 只返回命中，不调用大模型。对应的 `/query` 用 `output` 选择返回内容：`hits` 只返回命中，`answer` 只返回回答，`both` 两者都返回。不传 `output` 时看 `llm.enabled`：`true` 相当于 `both`，`false` 相当于 `hits`。
 
+可选 `hit_fields` 由客户端决定每条 hit 返回哪些键：不传则返回该语料全部 hit 字段；传入非空数组则只保留名单中的键（去重、保序）。字段名必须属于对应语料的 hit 模型，否则 422。只裁剪 `hits[]`，顶层 `question` / `collection` / `mode` / `output` / `answer` 不受影响。
+
 ```powershell
-$body = @{ question = "2025年毛利率是多少"; stock_code = "600519"; period = "2025" } | ConvertTo-Json -Compress
+$body = @{ question = "2025年毛利率是多少"; stock_code = "600519"; period = "2025"; hit_fields = @("rank", "title", "chunk_text") } | ConvertTo-Json -Compress
 Invoke-RestMethod http://127.0.0.1:8100/financial_report/retrieve -Method Post -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-四个接口都返回 `question`、`collection` 和 `mode`。`collection` 由路径决定，是 `knowledge` 或 `financial_report`。`retrieve` 带 `hits`。`query` 再带实际采用的 `output`：`hits` 和 `both` 带 `hits`，`answer` 和 `both` 带 `answer`。大模型失败时返回 502，并带上已经检索到的 `hits`。每条命中仍有 `scope`、`doc_type`、`stock_name`、`stock_code`、`year`、`period`、`published_on`、`section`、`entity`、`figure`、`occasion`；这份材料用不到的字段是空字符串，没有年份时 `year` 为 0。投资理论的展示名来自 `figure`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
+四个接口都返回 `question`、`collection` 和 `mode`。`collection` 由路径决定，是 `knowledge` 或 `financial_report`。`retrieve` 带 `hits`。`query` 再带实际采用的 `output`：`hits` 和 `both` 带 `hits`，`answer` 和 `both` 带 `answer`。大模型失败时返回 502，并带上已经检索到的 `hits`（同样受 `hit_fields` 约束）。两套命中字段分开维护：knowledge 带 `year`、`figure`、`occasion`；financial_report 带 `stock_name`、`stock_code`、`period`、`published_on`、`section`、`entity`。共用字段是 `scope`、`doc_type`、`title` 以及检索本身的 `rank`、`id`、`source_*`、`chunk_*`、`score`。投资理论的展示名来自 `figure`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
 
 ## 更换 embedding
 

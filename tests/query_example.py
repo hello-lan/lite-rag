@@ -9,7 +9,7 @@ FINANCIAL_REPORT_URL = "http://127.0.0.1:8008/financial_report/query"
 
 
 def query(url: str, question: str, **options) -> dict:
-    """knowledge 可传 doc_type、figure、occasion、year。financial_report 可传 stock_name、stock_code、period、section、entity。还可传 mode、top_k、output。不传 mode、top_k、output 时使用 config.yaml。"""
+    """knowledge 可传 doc_type、figure、occasion、year。financial_report 可传 stock_name、stock_code、period、section、entity。还可传 mode、top_k、output、hit_fields。不传 mode、top_k、output 时使用 config.yaml。hit_fields 不传则返回全部 hit 字段。"""
     resp = requests.post(
         url,
         json={"question": question, **options},
@@ -28,6 +28,7 @@ def main() -> None:
         mode="hybrid",  # hybrid | bm25 | vector
         top_k=5,  # >= 1
         output="both",  # hits | answer | both；不传则看 llm.enabled
+        # hit_fields=["rank", "title", "chunk_text"],  # 可选；不传则返回全部 hit 字段
     )
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
