@@ -67,8 +67,10 @@ def load_config() -> dict:
             raise SystemExit("embedding.keep_in_memory 只能是 true 或 false")
     bm25 = (cfg.get("paths") or {}).get("bm25_index")
     if not isinstance(bm25, dict):
-        raise SystemExit("paths.bm25_index 需要是映射，例如 financial_report / knowledge 各一个文件")
-    for scope in ("financial_report", "knowledge"):
+        raise SystemExit(
+            "paths.bm25_index 需要是映射，例如 financial_report / investor_materials / knowledge 各一个文件"
+        )
+    for scope in ("financial_report", "investor_materials", "knowledge"):
         if not bm25.get(scope):
             raise SystemExit(f"配置缺少 paths.bm25_index.{scope}")
     return cfg

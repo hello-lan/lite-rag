@@ -117,6 +117,49 @@ class FilingMetaTests(unittest.TestCase):
             },
         )
 
+    def test_investor_materials_chroma_uses_doc_type_stock_and_year(self) -> None:
+        doc = doc_meta_from_fields(
+            {
+                "scope": "investor_materials",
+                "doc_type": "ir_activities",
+                "title": "美的集团投资者关系活动记录表",
+                "stock_name": "美的集团",
+                "stock_code": "000333",
+                "year": 2024,
+            }
+        )
+        meta = chroma_meta("doc-ir", doc)
+        self.assertEqual(meta["doc_type"], "ir_activities")
+        self.assertEqual(meta["stock_name"], "美的集团")
+        self.assertEqual(meta["stock_code"], "000333")
+        self.assertEqual(meta["year"], 2024)
+        self.assertNotIn("period", meta)
+        self.assertNotIn("published_on", meta)
+
+    def test_investor_materials_query_keeps_year(self) -> None:
+        filt = SearchFilter.parse(
+            scope="investor_materials",
+            doc_type="research",
+            stock_code="002027",
+            year=2025,
+        )
+        self.assertEqual(filt.year, 2025)
+        self.assertEqual(
+            filt.chroma_where(),
+            {
+                "$and": [
+                    {"doc_type": "research"},
+                    {"stock_code": "002027"},
+                    {"year": 2025},
+                ]
+            },
+        )
+
+    def test_investor_materials_rejects_filing_filters(self) -> None:
+        with self.assertRaises(SystemExit) as caught:
+            SearchFilter.parse(scope="investor_materials", period="2024")
+        self.assertEqual(caught.exception.code, "investor_materials 不支持 period、section、entity")
+
     def test_filing_filter_uses_period_section_and_entity(self) -> None:
         with self.assertRaises(SystemExit):
             SearchFilter.parse(doc_type="filing", section="balance")
@@ -186,9 +229,15 @@ class FilingMetaTests(unittest.TestCase):
                 self.assertEqual(count, 0)
                 self.assertEqual(columns, required_columns(scope))
             company_cols = required_columns("financial_report")
+            investor_cols = required_columns("investor_materials")
             knowledge_cols = required_columns("knowledge")
             self.assertTrue({"stock_name", "stock_code", "period", "section", "entity"} <= company_cols)
             self.assertFalse({"scope", "year", "figure", "occasion"} & company_cols)
+            self.assertTrue({"stock_name", "stock_code", "year"} <= investor_cols)
+            self.assertFalse(
+                {"scope", "period", "published_on", "section", "entity", "figure", "occasion"}
+                & investor_cols
+            )
             self.assertTrue({"figure", "occasion", "year"} <= knowledge_cols)
             self.assertFalse({"scope", "stock_name", "stock_code", "period", "section", "entity"} & knowledge_cols)
             conn.close()

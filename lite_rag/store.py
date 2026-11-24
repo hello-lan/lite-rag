@@ -17,12 +17,14 @@ _PUNCT = re.compile(r"^[\s\W_]+$", re.UNICODE)
 _jieba_ready = False
 _model = None
 
-# financial_report / knowledge 分表；id 只在表内唯一，检索与 BM25 必须带 scope。
+# 按 scope 分表；id 只在表内唯一，检索与 BM25 必须带 scope。
 CHUNK_TABLES = {
     "financial_report": "financial_report_chunks",
+    "investor_materials": "investor_materials_chunks",
     "knowledge": "knowledge_chunks",
 }
 _LEGACY_CHUNK_TABLES = ("chunks", "company_chunks")
+_INVESTOR_DOC_TYPES = frozenset({"ir_qa", "ir_activities", "research", "news"})
 
 # scope 由分表表达，不再单独建列；查询时用字面量补回给 DocMeta / API。
 _COMMON_COLUMNS = (
@@ -38,7 +40,7 @@ _COMMON_COLUMNS = (
     "doc_type",
     "title",
 )
-# 两边元信息不同：公司材料看股票/报告期，通识材料看人物/场合。
+# 定期报告看股票/报告期，投资者材料看股票/年份，通识材料看人物/场合。
 _SCOPE_META_COLUMNS = {
     "financial_report": (
         "stock_name",
@@ -47,6 +49,11 @@ _SCOPE_META_COLUMNS = {
         "published_on",
         "section",
         "entity",
+    ),
+    "investor_materials": (
+        "stock_name",
+        "stock_code",
+        "year",
     ),
     "knowledge": (
         "year",
@@ -76,6 +83,11 @@ _SCOPE_CREATE_SQL = {
     , published_on TEXT NOT NULL DEFAULT ''
     , section TEXT NOT NULL DEFAULT ''
     , entity TEXT NOT NULL DEFAULT ''
+    """,
+    "investor_materials": """
+    , stock_name TEXT NOT NULL DEFAULT ''
+    , stock_code TEXT NOT NULL DEFAULT ''
+    , year INTEGER NOT NULL DEFAULT 0
     """,
     "knowledge": """
     , year INTEGER NOT NULL DEFAULT 0
@@ -137,8 +149,10 @@ def scopes_for_filter(filt: SearchFilter) -> list[str]:
             if filt.doc_type in types:
                 return [scope]
         return []
-    if filt.stock_name or filt.stock_code or filt.period or filt.section or filt.entity:
+    if filt.period or filt.section or filt.entity:
         return ["financial_report"]
+    if filt.stock_name or filt.stock_code:
+        return ["financial_report", "investor_materials"]
     if filt.figure or filt.occasion:
         return ["knowledge"]
     return list(SCOPES)
@@ -211,13 +225,17 @@ def _create_chunk_table(conn: sqlite3.Connection, scope: str) -> None:
     if scope == "financial_report":
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_stock ON {table}(stock_code)")
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_stock_name ON {table}(stock_name)")
+    elif scope == "investor_materials":
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_stock ON {table}(stock_code)")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_stock_name ON {table}(stock_name)")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_year ON {table}(year)")
     elif scope == "knowledge":
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_figure ON {table}(figure)")
         conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_year ON {table}(year)")
 
 
 def init_meta_db(db_path: Path) -> bool:
-    """确保 financial_report_chunks / knowledge_chunks 是当前结构。旧表直接删除，返回是否清掉了旧库。"""
+    """确保各 scope 分表是当前结构。旧表直接删除，返回是否清掉了旧库。"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect_db(db_path)
     reset = False
@@ -497,9 +515,10 @@ def doc_types_for_filter(cfg: dict, filt: SearchFilter) -> list[str]:
             raise SystemExit(f"scope={filt.scope} 下还没有可查询的 collection")
         return types
     if filt.stock_name or filt.stock_code:
-        types = sorted(doc_type for doc_type in TYPES_BY_SCOPE["financial_report"] if doc_type in mapping)
+        company_types = TYPES_BY_SCOPE["financial_report"] | TYPES_BY_SCOPE["investor_materials"]
+        types = sorted(doc_type for doc_type in company_types if doc_type in mapping)
         if not types:
-            raise SystemExit("公司材料还没有对应的 Chroma collection")
+            raise SystemExit("定期报告或投资者材料还没有对应的 Chroma collection")
         return types
     return list(mapping)
 
@@ -564,9 +583,11 @@ def clear_source_vectors(client, cfg: dict, source_doc_ids: set[str], ids: list[
         _delete_where_source(client, cfg, source_doc_id)
 
 
+_INVESTOR_CHROMA_FIELDS = frozenset({"doc_type", "stock_name", "stock_code", "year"})
 _CHROMA_QUERY_FIELDS = {
     "investment_theory": frozenset({"doc_type", "figure", "occasion", "year"}),
     "filing": frozenset({"stock_name", "stock_code", "period", "section", "entity"}),
+    **{doc_type: _INVESTOR_CHROMA_FIELDS for doc_type in _INVESTOR_DOC_TYPES},
 }
 
 
@@ -594,6 +615,15 @@ def chroma_meta(source_doc_id: str, doc: DocMeta) -> dict:
         if doc.entity:
             meta["entity"] = doc.entity
         return meta
+    if doc.doc_type in _INVESTOR_DOC_TYPES:
+        meta["doc_type"] = doc.doc_type
+        if doc.stock_name:
+            meta["stock_name"] = doc.stock_name
+        if doc.stock_code:
+            meta["stock_code"] = doc.stock_code
+        if doc.year:
+            meta["year"] = int(doc.year)
+        return meta
     raise SystemExit(f"doc_type={doc.doc_type} 还没有对应的 Chroma collection")
 
 
@@ -612,7 +642,7 @@ def chroma_where_fits(doc_types: list[str], filt: SearchFilter) -> bool:
         needed.add("section")
     if filt.entity:
         needed.add("entity")
-    if filt.doc_type == "investment_theory":
+    if filt.doc_type and filt.doc_type != "filing":
         needed.add("doc_type")
     if filt.figure:
         needed.add("figure")

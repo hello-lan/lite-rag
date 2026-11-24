@@ -32,17 +32,22 @@ paths:
   # 入库生成的 sqlite、BM25 和 Chroma 都放在 data/
   chroma_dir: data/chroma
   meta_db: data/meta.db
-  # financial_report / knowledge 分表，BM25 也按 scope 分开（表内 id 独立自增）
+  # 按 scope 分表，BM25 也按 scope 分开（表内 id 独立自增）
   bm25_index:
     financial_report: data/financial_report_bm25.pkl
+    investor_materials: data/investor_materials_bm25.pkl
     knowledge: data/knowledge_bm25.pkl
   # doc_type 对应的 Chroma collection。未列出的类型不写入向量。
   collections:
-    investment_theory: knowledge
     filing: financial_report
+    ir_qa: investor_materials
+    ir_activities: investor_materials
+    research: investor_materials
+    news: investor_materials
+    investment_theory: knowledge
 
 llm:
-  # HTTP：/knowledge/query 和 /financial_report/query 不传 output 时，true 相当于 both，false 相当于 hits。
+  # HTTP：各语料 /query 不传 output 时，true 相当于 both，false 相当于 hits。
   # 命令行：不传 --output 时，true 打印命中和回答，false 只打印命中。
   enabled: false
   base_url: "https://api.deepseek.com"

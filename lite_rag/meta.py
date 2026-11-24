@@ -7,19 +7,28 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import PurePosixPath
 
-SCOPES = ("financial_report", "knowledge")
-DOC_TYPES = ("filing", "ir_qa", "survey", "research", "news", "investment_theory", "beginner")
+SCOPES = ("financial_report", "investor_materials", "knowledge")
+DOC_TYPES = (
+    "filing",
+    "ir_qa",
+    "ir_activities",
+    "research",
+    "news",
+    "investment_theory",
+    "beginner",
+)
 DOC_TYPE_LABELS = {
     "filing": "定期报告",
     "ir_qa": "互动问答",
-    "survey": "投资者调研",
+    "ir_activities": "投资者关系活动记录",
     "research": "研报",
     "news": "新闻",
     "investment_theory": "投资理论",
     "beginner": "入门答疑",
 }
 TYPES_BY_SCOPE = {
-    "financial_report": frozenset({"filing", "ir_qa", "survey", "research", "news"}),
+    "financial_report": frozenset({"filing"}),
+    "investor_materials": frozenset({"ir_qa", "ir_activities", "research", "news"}),
     "knowledge": frozenset({"investment_theory", "beginner"}),
 }
 FIGURES = ("唐朝", "buffett", "munger")
@@ -35,10 +44,11 @@ OCCASION_LABELS = {
     "speech": "演讲",
     "article": "文章",
 }
-# 采集脚本当前的默认目录，和 financial_report/ir_qa 一样记成互动问答。
+# 采集脚本当前的默认目录，记成投资者材料下的互动问答 / 投关活动。
 _ROOT_ALIASES = {
-    "sse": ("financial_report", "ir_qa"),
-    "irm": ("financial_report", "ir_qa"),
+    "sse": ("investor_materials", "ir_qa"),
+    "irm": ("investor_materials", "ir_qa"),
+    "ir_activities": ("investor_materials", "ir_activities"),
 }
 SECTIONS = (
     "profile",
@@ -348,6 +358,8 @@ class SearchFilter:
                     "entity",
                 }
             )
+        elif scope == "investor_materials":
+            allowed = frozenset({"doc_type", "stock_name", "stock_code", "year"})
         elif scope == "knowledge":
             allowed = frozenset({"doc_type", "year", "figure", "occasion"})
         elif scope:
@@ -392,7 +404,7 @@ class SearchFilter:
     def chroma_where(self) -> dict | None:
         """只包含向量 metadata 上的筛选。scope 用来选择 collection。"""
         parts = []
-        if self.doc_type == "investment_theory":
+        if self.doc_type and self.doc_type != "filing":
             parts.append({"doc_type": self.doc_type})
         if self.figure:
             parts.append({"figure": self.figure})
@@ -456,6 +468,8 @@ class SearchFilter:
             raise SystemExit("year 需要是 1900 到 2100 之间的年份")
         if number and _query_includes_filing(scope_text, type_text):
             raise SystemExit("查财报请用 period，不要用 year")
+        if scope_text == "investor_materials" and (period_text or section_text or entity_text):
+            raise SystemExit("investor_materials 不支持 period、section、entity")
         in_theory = type_text == "investment_theory" or (
             scope_text == "knowledge" and type_text in ("", "investment_theory")
         )
@@ -486,8 +500,8 @@ def _classify_folder(relative: str) -> tuple[str, str, bool]:
         return "financial_report", "filing", False
     if len(parts) < 3:
         raise ValueError(
-            f"{relative} 需要放在类型子目录下，例如 financial_report/filing/ "
-            f"或 knowledge/investment_theory/"
+            f"{relative} 需要放在类型子目录下，例如 financial_report/filing/、"
+            f"investor_materials/ir_qa/ 或 knowledge/investment_theory/"
         )
     kind = parts[1]
     allowed = TYPES_BY_SCOPE[parts[0]]
@@ -499,7 +513,7 @@ def _classify_folder(relative: str) -> tuple[str, str, bool]:
 
 def _from_filename(stem: str, scope: str) -> dict:
     found: dict = {}
-    if scope == "financial_report":
+    if scope in ("financial_report", "investor_materials"):
         matched = _CODE_NAME.match(stem)
         if matched:
             found["stock_code"] = matched.group("code")
@@ -604,12 +618,12 @@ def _row_int(row, key: str) -> int:
 
 
 def _query_includes_filing(scope: str, doc_type: str) -> bool:
-    """未指定类型时，公司范围和未限定范围都会查到财报。"""
+    """未指定类型时，定期报告范围和未限定范围都会查到财报。"""
     if doc_type == "filing":
         return True
     if doc_type:
         return False
-    return scope != "knowledge"
+    return scope in ("", "financial_report")
 
 
 def _check_section_entity(values: dict) -> None:

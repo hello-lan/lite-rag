@@ -22,6 +22,7 @@ from lite_rag.search import retrieve
 
 _KNOWLEDGE_DOC_TYPES = sorted(TYPES_BY_SCOPE["knowledge"])
 _FINANCIAL_DOC_TYPES = sorted(TYPES_BY_SCOPE["financial_report"])
+_INVESTOR_DOC_TYPES = sorted(TYPES_BY_SCOPE["investor_materials"])
 
 
 @click.group(help="本地财报 RAG：预切分 JSON 入库、查询、按新模型重算向量、启动查询接口。")
@@ -166,7 +167,7 @@ def query_knowledge(
     _run_query(cfg, text, filt, output)
 
 
-@cli.command("query-financial-report", help="检索公司材料 chunk，可选调用大模型生成回答。")
+@cli.command("query-financial-report", help="检索定期报告 chunk，可选调用大模型生成回答。")
 @click.argument("question", nargs=-1, required=True)
 @_MODE_OPTION
 @_TOP_K_OPTION
@@ -174,7 +175,7 @@ def query_knowledge(
 @click.option(
     "--doc-type",
     type=click.Choice(_FINANCIAL_DOC_TYPES),
-    help="材料类型：filing、ir_qa、survey、research、news",
+    help="材料类型：filing",
 )
 @click.option("--stock-name", "stock_name", default=None, help="股票简称，精确匹配")
 @click.option("--code", "stock_code", default=None, help="6 位股票代码")
@@ -213,6 +214,41 @@ def query_financial_report(
         period=period,
         section=section,
         entity=entity,
+    )
+    _run_query(cfg, text, filt, output)
+
+
+@cli.command("query-investor-materials", help="检索投资者材料 chunk，可选调用大模型生成回答。")
+@click.argument("question", nargs=-1, required=True)
+@_MODE_OPTION
+@_TOP_K_OPTION
+@_OUTPUT_OPTION
+@click.option(
+    "--doc-type",
+    type=click.Choice(_INVESTOR_DOC_TYPES),
+    help="材料类型：ir_qa、ir_activities、research、news",
+)
+@click.option("--stock-name", "stock_name", default=None, help="股票简称，精确匹配")
+@click.option("--code", "stock_code", default=None, help="6 位股票代码")
+@click.option("--year", type=click.IntRange(1900, 2100), help="年份")
+def query_investor_materials(
+    question: tuple[str, ...],
+    mode: str | None,
+    top_k: int | None,
+    output: str | None,
+    doc_type: str | None,
+    stock_name: str | None,
+    stock_code: str | None,
+    year: int | None,
+) -> None:
+    cfg = _prepare_cfg(mode, top_k)
+    text = _question_text(question)
+    filt = SearchFilter.parse(
+        scope="investor_materials",
+        doc_type=doc_type,
+        stock_name=stock_name,
+        stock_code=stock_code,
+        year=year,
     )
     _run_query(cfg, text, filt, output)
 

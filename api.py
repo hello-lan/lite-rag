@@ -1,4 +1,4 @@
-"""财报 RAG 查询接口。knowledge 与 financial_report 分路径，请求字段不混用。"""
+"""财报 RAG 查询接口。knowledge、financial_report、investor_materials 分路径，请求字段不混用。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from lite_rag.store import get_model, keep_model_loaded, model_is_loaded, releas
 Mode = Literal["hybrid", "bm25", "vector"]
 Output = Literal["hits", "answer", "both"]
 TheoryType = Literal["investment_theory"]
+InvestorDocType = Literal["ir_qa", "ir_activities", "research", "news"]
 Figure = Literal["唐朝", "buffett", "munger"]
 Occasion = Literal["letter", "meeting", "speech", "article"]
 Section = Literal["profile", "mda", "material", "governance", "financials", "notes", "other"]
@@ -50,9 +51,15 @@ OUTPUT_LABELS = {
 COLLECTION_LABELS = {
     "knowledge": "投资通识",
     "financial_report": "定期报告",
+    "investor_materials": "投资者材料",
 }
 THEORY_TYPE_LABELS = {
     key: DOC_TYPE_LABELS[key] for key in ("investment_theory",) if key in DOC_TYPE_LABELS
+}
+INVESTOR_TYPE_LABELS = {
+    key: DOC_TYPE_LABELS[key]
+    for key in ("ir_qa", "ir_activities", "research", "news")
+    if key in DOC_TYPE_LABELS
 }
 
 
@@ -105,12 +112,21 @@ class FilingHit(_HitBase):
     entity: str = ""
 
 
+class InvestorMaterialsHit(_HitBase):
+    stock_name: str
+    stock_code: str
+    year: int
+
+
 _KNOWLEDGE_HIT_KEYS = tuple(KnowledgeHit.model_fields)
 _FILING_HIT_KEYS = tuple(FilingHit.model_fields)
+_INVESTOR_HIT_KEYS = tuple(InvestorMaterialsHit.model_fields)
 _KNOWLEDGE_HIT_KEY_SET = frozenset(_KNOWLEDGE_HIT_KEYS)
 _FILING_HIT_KEY_SET = frozenset(_FILING_HIT_KEYS)
+_INVESTOR_HIT_KEY_SET = frozenset(_INVESTOR_HIT_KEYS)
 KnowledgeHitField = Literal[*_KNOWLEDGE_HIT_KEYS]
 FilingHitField = Literal[*_FILING_HIT_KEYS]
+InvestorHitField = Literal[*_INVESTOR_HIT_KEYS]
 
 
 def _normalize_hit_fields(value: list[str] | None, allowed: frozenset[str]) -> list[str] | None:
@@ -259,12 +275,66 @@ class FilingQueryRequest(FilingRetrieveRequest):
     )
 
 
-RetrieveBody = KnowledgeRetrieveRequest | FilingRetrieveRequest
-QueryBody = KnowledgeQueryRequest | FilingQueryRequest
+class InvestorMaterialsRetrieveRequest(_RequestBase):
+    """POST /investor_materials/retrieve。只查投资者材料，可按大类、公司、代码和年份筛选。"""
+
+    doc_type: InvestorDocType | None = _enum_field(
+        "大类。不传则不限大类",
+        INVESTOR_TYPE_LABELS,
+        default=None,
+    )
+    stock_name: str | None = Field(default=None, description="股票简称，精确匹配")
+    stock_code: str | None = Field(default=None, description="6 位股票代码")
+    year: StrictInt | None = Field(default=None, ge=1900, le=2100, description="年份。不传则不限年份")
+    hit_fields: list[InvestorHitField] | None = Field(
+        default=None,
+        description="要返回的 hit 字段。不传则返回全部；传入则每条 hit 只保留名单中的键",
+        min_length=1,
+    )
+
+    @field_validator("stock_name")
+    @classmethod
+    def investor_stock_name_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("不能为空")
+        return text
+
+    @field_validator("stock_code")
+    @classmethod
+    def investor_code_is_six_digits(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if len(text) != 6 or not text.isdigit():
+            raise ValueError("需要是 6 位数字")
+        return text
+
+    @field_validator("hit_fields")
+    @classmethod
+    def investor_hit_fields(cls, value: list[str] | None) -> list[str] | None:
+        return _normalize_hit_fields(value, _INVESTOR_HIT_KEY_SET)
+
+
+class InvestorMaterialsQueryRequest(InvestorMaterialsRetrieveRequest):
+    """POST /investor_materials/query。"""
+
+    output: Output | None = _enum_field(
+        "返回内容。不传则看 llm.enabled：true 相当于 both，false 相当于 hits",
+        OUTPUT_LABELS,
+        default=None,
+    )
+
+
+RetrieveBody = KnowledgeRetrieveRequest | FilingRetrieveRequest | InvestorMaterialsRetrieveRequest
+QueryBody = KnowledgeQueryRequest | FilingQueryRequest | InvestorMaterialsQueryRequest
 
 
 _KNOWLEDGE_COLLECTION = {"knowledge": COLLECTION_LABELS["knowledge"]}
 _FILING_COLLECTION = {"financial_report": COLLECTION_LABELS["financial_report"]}
+_INVESTOR_COLLECTION = {"investor_materials": COLLECTION_LABELS["investor_materials"]}
 
 
 class KnowledgeRetrieveResponse(BaseModel):
@@ -279,6 +349,17 @@ class FilingRetrieveResponse(BaseModel):
     collection: Literal["financial_report"] = _enum_field("由请求路径决定的语料范围", _FILING_COLLECTION)
     mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
     hits: list[FilingHit] = Field(description="命中列表。请求传了 hit_fields 时每条只含名单中的键")
+
+
+class InvestorMaterialsRetrieveResponse(BaseModel):
+    question: str = Field(description="查询问题")
+    collection: Literal["investor_materials"] = _enum_field(
+        "由请求路径决定的语料范围", _INVESTOR_COLLECTION
+    )
+    mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
+    hits: list[InvestorMaterialsHit] = Field(
+        description="命中列表。请求传了 hit_fields 时每条只含名单中的键"
+    )
 
 
 class KnowledgeQueryResponse(BaseModel):
@@ -308,6 +389,29 @@ class FilingQueryResponse(BaseModel):
     mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
     output: Output = _enum_field("实际采用的返回内容", OUTPUT_LABELS)
     hits: list[FilingHit] | None = Field(
+        default=None,
+        description="命中列表。请求传了 hit_fields 时每条只含名单中的键",
+    )
+    answer: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unused(self, handler):
+        data = handler(self)
+        if self.hits is None:
+            data.pop("hits", None)
+        if self.answer is None:
+            data.pop("answer", None)
+        return data
+
+
+class InvestorMaterialsQueryResponse(BaseModel):
+    question: str = Field(description="查询问题")
+    collection: Literal["investor_materials"] = _enum_field(
+        "由请求路径决定的语料范围", _INVESTOR_COLLECTION
+    )
+    mode: Mode = _enum_field("实际使用的检索模式", MODE_LABELS)
+    output: Output = _enum_field("实际采用的返回内容", OUTPUT_LABELS)
+    hits: list[InvestorMaterialsHit] | None = Field(
         default=None,
         description="命中列表。请求传了 hit_fields 时每条只含名单中的键",
     )
@@ -369,6 +473,14 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
                 "doc_type": body.doc_type,
                 "figure": body.figure,
                 "occasion": body.occasion,
+                "year": body.year,
+            }
+        elif isinstance(body, InvestorMaterialsRetrieveRequest):
+            filters = {
+                "scope": "investor_materials",
+                "doc_type": body.doc_type,
+                "stock_name": body.stock_name,
+                "stock_code": body.stock_code,
                 "year": body.year,
             }
         else:
@@ -489,6 +601,55 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
             content["answer"] = answer
         return UTF8JSONResponse(content=content)
 
+    def _investor_retrieve_response(body: InvestorMaterialsRetrieveRequest) -> UTF8JSONResponse:
+        cfg = _prepare(body)
+        keys = _hit_keys(body.hit_fields, _INVESTOR_HIT_KEYS)
+        with query_lock:
+            hits = _project_hits(_retrieve_hits(cfg, body), keys)
+        return UTF8JSONResponse(
+            content={
+                "question": body.question,
+                "collection": "investor_materials",
+                "mode": cfg["retrieval"]["mode"],
+                "hits": hits,
+            }
+        )
+
+    def _investor_query_response(body: InvestorMaterialsQueryRequest) -> UTF8JSONResponse:
+        cfg = _prepare(body)
+        chosen = _chosen_output(body, cfg)
+        keys = _hit_keys(body.hit_fields, _INVESTOR_HIT_KEYS)
+        with query_lock:
+            raw_hits = _retrieve_hits(cfg, body)
+            hits = _project_hits(raw_hits, keys)
+            answer = None
+            if chosen in ("answer", "both"):
+                try:
+                    answer = generate_answer(cfg, body.question, raw_hits)
+                except SystemExit as exc:
+                    return UTF8JSONResponse(
+                        status_code=502,
+                        content={
+                            "detail": _exit_message(exc),
+                            "collection": "investor_materials",
+                            "mode": cfg["retrieval"]["mode"],
+                            "output": chosen,
+                            "hits": hits,
+                        },
+                    )
+
+        content: dict[str, Any] = {
+            "question": body.question,
+            "collection": "investor_materials",
+            "mode": cfg["retrieval"]["mode"],
+            "output": chosen,
+        }
+        if chosen != "answer":
+            content["hits"] = hits
+        if chosen in ("answer", "both"):
+            content["answer"] = answer
+        return UTF8JSONResponse(content=content)
+
     @app.get("/health")
     def health() -> dict:
         db_path = resolve_path(base_cfg, base_cfg["paths"]["meta_db"])
@@ -514,6 +675,14 @@ def create_app(keep_model: bool | None = None) -> FastAPI:
     @app.post("/financial_report/query", response_model=FilingQueryResponse)
     def query_financial_report(body: FilingQueryRequest) -> UTF8JSONResponse:
         return _filing_query_response(body)
+
+    @app.post("/investor_materials/retrieve", response_model=InvestorMaterialsRetrieveResponse)
+    def retrieve_investor_materials(body: InvestorMaterialsRetrieveRequest) -> UTF8JSONResponse:
+        return _investor_retrieve_response(body)
+
+    @app.post("/investor_materials/query", response_model=InvestorMaterialsQueryResponse)
+    def query_investor_materials(body: InvestorMaterialsQueryRequest) -> UTF8JSONResponse:
+        return _investor_query_response(body)
 
     return app
 
