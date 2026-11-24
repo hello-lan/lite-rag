@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 import sys
 import time
@@ -79,6 +80,18 @@ REPORT_PROFILES: Dict[str, Dict[str, Any]] = {
 PAGE_SIZE = 30
 MAX_RETRIES = 3
 DOWNLOAD_DELAY = 1.0
+
+
+def _random_sleep(base: float = DOWNLOAD_DELAY) -> None:
+    """Sleep a random interval around `base` to reduce rate-limit risk.
+
+    Actual wait is uniform in about [0.8x, 2.0x] of base (at least +0.5s span).
+    """
+    if base <= 0:
+        return
+    lo = max(0.3, base * 0.8)
+    hi = max(lo + 0.5, base * 2.0)
+    time.sleep(random.uniform(lo, hi))
 
 
 def default_save_dir(report_type: str) -> str:
@@ -243,7 +256,7 @@ class BaseSpider:
                 content = self._fetch_pdf_bytes(download_url)
                 if content is None:
                     if attempt + 1 < MAX_RETRIES:
-                        time.sleep(self.delay * (attempt + 1))
+                        _random_sleep(self.delay * (attempt + 1))
                         continue
                     self._log(f"下载失败 {save_name}: 文件不是有效PDF")
                     return False
@@ -252,7 +265,7 @@ class BaseSpider:
                 return True
             except Exception as e:
                 self._log(f"下载重试中... {str(e)}")
-                time.sleep(self.delay * (attempt + 1))
+                _random_sleep(self.delay * (attempt + 1))
 
         self._log(f"最终下载失败: {save_name}")
         return False
@@ -354,7 +367,7 @@ class BaseSpider:
             if len(items) < PAGE_SIZE:
                 break
             page += 1
-            time.sleep(self.delay)
+            _random_sleep(self.delay)
 
         all_items = self._filter_items(
             all_items, profile, category_cfg, start_year, end_year
@@ -388,7 +401,8 @@ class BaseSpider:
                         "source": self.source_name,
                     }
                 )
-            time.sleep(DOWNLOAD_DELAY)
+            # 每个文件下载后随机间隔，避免请求过密被封
+            _random_sleep(max(self.delay, DOWNLOAD_DELAY))
         return downloaded
 
 
@@ -747,7 +761,7 @@ def batch_download(
         source_stats[key] = source_stats.get(key, 0) + 1
 
         if i < len(stock_codes) - 1:
-            time.sleep(delay or 1.0)
+            _random_sleep(delay or DOWNLOAD_DELAY)
 
     print(f"\n{'=' * 50}")
     print("数据源使用统计:")
@@ -814,7 +828,12 @@ def main() -> None:
         default=None,
         help="PDF保存目录（默认按 --type 选择 annual_reports / ir_activities）",
     )
-    parser.add_argument("--delay", type=float, default=0.5, help="请求间隔秒数")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=1.0,
+        help="请求间隔基准秒数（实际会在约 0.8x~2.0x 内随机抖动）",
+    )
     parser.add_argument(
         "--source",
         choices=["cninfo", "eastmoney", "sina"],

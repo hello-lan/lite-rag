@@ -1,28 +1,28 @@
 # 财报 RAG（BM25 + 向量 + RRF）
 
-本地查询公司材料和投资通识。向量放在 Chroma，chunk 原文和元信息放在同一份 sqlite（`financial_report_chunks` / `knowledge_chunks` 分表），BM25 也按 scope 分开。BM25 负责年份、科目、指标名这类字面匹配，BGE-M3 负责语义，两路结果用 RRF 合并。查某一家公司或某一类材料时，两路使用同一套筛选条件。
+本地查询定期报告、投资者材料和投资通识。向量放在 Chroma，chunk 原文和元信息放在同一份 sqlite（按 scope 分表），BM25 也按 scope 分开。BM25 负责年份、科目、指标名这类字面匹配，BGE-M3 负责语义，两路结果用 RRF 合并。查某一家公司或某一类材料时，两路使用同一套筛选条件。
 
 换 embedding 模型时只重算向量，不用重新解析 PDF，也不用重建 BM25。
 
 ## 目录
 
 ```
-corpus/02_processed/financial_report/filing/     年报、半年报、季报
-corpus/02_processed/financial_report/ir_qa/      互动易、上证 e 互动
-corpus/02_processed/financial_report/survey/     投资者调研
-corpus/02_processed/financial_report/research/   研报
-corpus/02_processed/financial_report/news/       新闻
-corpus/02_processed/knowledge/investment_theory/   投资理论
-corpus/02_processed/knowledge/beginner/ 投资入门答疑
+corpus/02_processed/financial_report/filing/           年报、半年报、季报
+corpus/02_processed/investor_materials/ir_qa/          互动易、上证 e 互动
+corpus/02_processed/investor_materials/ir_activities/  投资者关系活动记录
+corpus/02_processed/investor_materials/research/       研报
+corpus/02_processed/investor_materials/news/           新闻
+corpus/02_processed/knowledge/investment_theory/       投资理论
+corpus/02_processed/knowledge/beginner/                投资入门答疑
 corpus/raw/sse、corpus/raw/irm       采集脚本的默认输出，入库时用 --dir 或改 --output
 corpus/03_splited/                  已经切好的 JSON，入库时只做嵌入
 corpus/tangchao/               唐朝书房原文
 corpus/BRK-Annual-Meeting/     伯克希尔股东大会记录
 models/bge-m3/               本地 BGE-M3 模型
-data/                        入库生成的索引：meta.db（financial_report_chunks / knowledge_chunks）、financial_report_bm25.pkl、knowledge_bm25.pkl、chroma/
+data/                        入库生成的索引：meta.db（三套 chunks 表）、三套 BM25、chroma/
 config.yaml                  切分、模型、召回条数、大模型
-main.py                      命令行入口：ingest-split、query-knowledge、query-financial-report、reembed、serve
-api.py                       查询接口：/knowledge、/financial_report 各自的 retrieve 与 query
+main.py                      命令行入口：ingest-split、query-*、reembed、serve
+api.py                       查询接口：/knowledge、/financial_report、/investor_materials
 lite_rag/                    索引、检索、回答；只导入已切分 JSON
 scripts/                     切分、抽取、采集（年报/互动易等）
 ```
@@ -64,38 +64,49 @@ python main.py ingest-split --check
 
 ## 采集
 
-问答先写成 Markdown，再由业务脚本切成 JSON 后 `ingest-split`。`scripts/crawl_qa.py` 按代码自动分流（0/3→互动易，6→上证e互动），默认分别写到 `corpus/raw/irm` 和 `corpus/raw/sse`；也可用 `--output` 指到 `corpus/02_processed/financial_report/ir_qa`。
+问答先写成 Markdown，再由业务脚本切成 JSON 后 `ingest-split`。`scripts/crawl_qa.py` 按代码自动分流（0/3→互动易，6→上证e互动），默认分别写到 `corpus/raw/irm` 和 `corpus/raw/sse`；也可用 `--output` 指到 `corpus/02_processed/investor_materials/ir_qa`。
 
 ```powershell
 python scripts/crawl_qa.py --code 600519
 python scripts/crawl_qa.py --code 000001
-python scripts/crawl_qa.py --code 600519 --output corpus/02_processed/financial_report/ir_qa
+python scripts/crawl_qa.py --code 600519 --output corpus/02_processed/investor_materials/ir_qa
 ```
 
 ## 入库（只导入已切分 JSON）
 
-`lite_rag` 不再切分文档。PDF / Markdown 的切分由业务脚本完成（如 `scripts/split_annual_reports.py`、`scripts/ingest_tangchao.py`），写出到 `corpus/03_splited/`，再由 `ingest-split` 嵌入入库。
+`lite_rag` 不再切分文档。PDF / Markdown 的切分由业务脚本完成（如 `scripts/split_annual_reports.py`、`scripts/split_tangshufang.py`），写出到 `corpus/03_splited/`，再由 `ingest-split` 嵌入入库。
 
 一个 JSON 文件对应一份逻辑文档，可以放在 `corpus/03_splited/` 的任意子目录里。类型以文件里的 `meta` 为准，不看子目录名字。
 
 `meta` 里 `scope` 和 `doc_type` 必填，其余可以不写。单条 chunk 可以改自己的年份、日期或其他字段，没写的继承文档级 `meta`。`split` 用来标记这套切分；不写时记为 `external`。切分参数在业务脚本里（如 `CHUNK_SIZE`），改完后需重跑对应脚本再 `ingest-split`。
 
-`scope` 只能是 `financial_report` 或 `knowledge`；`doc_type` 在公司侧是 `filing`、`ir_qa`、`survey`、`research`、`news`，在通识侧是 `investment_theory`、`beginner`。`investment_theory` 还要写 `figure` 和 `occasion`：`figure` 是 `唐朝`、`buffett`（巴菲特）、`munger`（芒格）；`occasion` 是 `letter`（致投资者的信）、`meeting`（股东大会）、`speech`（演讲）、`article`（文章）。
+`scope` 只能是 `financial_report`、`investor_materials` 或 `knowledge`。
 
-财报向量只写非空的 `stock_name`、`stock_code`、`period`、`section`、`entity`，不写 `year`。`section` 可以是 `profile`、`mda`、`material`、`governance`、`financials`、`notes`、`other`。`entity` 只在 `financials` 或 `notes` 上使用，取 `consolidated` 或 `parent`。查财报用 `period`，不要用 `year`；`year` 只筛投资通识。
+| scope | doc_type |
+|-------|----------|
+| `financial_report` | `filing` |
+| `investor_materials` | `ir_qa`、`ir_activities`、`research`、`news` |
+| `knowledge` | `investment_theory`、`beginner` |
+
+`investment_theory` 还要写 `figure` 和 `occasion`：`figure` 是 `唐朝`、`buffett`（巴菲特）、`munger`（芒格）；`occasion` 是 `letter`（致投资者的信）、`meeting`（股东大会）、`speech`（演讲）、`article`（文章）。
+
+财报向量只写非空的 `stock_name`、`stock_code`、`period`、`section`、`entity`，不写 `year`。`section` 可以是 `profile`、`mda`、`material`、`governance`、`financials`、`notes`、`other`。`entity` 只在 `financials` 或 `notes` 上使用，取 `consolidated` 或 `parent`。查财报用 `period`，不要用 `year`。
+
+投资者材料向量写非空的 `doc_type`、`stock_name`、`stock_code`、`year`；没有 `published_on` / `period` / `section` / `entity`。通识侧用 `year` 筛选；投资者材料也用 `year`。
 
 ```json
 {
   "split": "qa-pair-v1",
   "meta": {
-    "scope": "financial_report",
+    "scope": "investor_materials",
     "doc_type": "ir_qa",
     "title": "贵州茅台互动问答",
     "stock_name": "贵州茅台",
-    "stock_code": "600519"
+    "stock_code": "600519",
+    "year": 2025
   },
   "chunks": [
-    {"text": "问：……\n答：……", "published_on": "2025-03-12", "year": 2025}
+    {"text": "问：……\n答：……", "year": 2025}
   ]
 }
 ```
@@ -118,12 +129,16 @@ python main.py query-financial-report 2025年毛利率是多少
 python main.py query-financial-report 公司主要风险有哪些 --mode vector
 python main.py query-financial-report 分红方案 --mode bm25 --code 600519 --doc-type filing
 python main.py query-financial-report 2025年资本开支是多少 --mode hybrid --top-k 4 --stock-name 贵州茅台 --period 2025 --section financials --entity consolidated
+python main.py query-investor-materials 管理层怎么看竞争格局 --doc-type ir_activities --code 000333 --year 2024
+python main.py query-investor-materials 机构怎么看分众 --doc-type research --code 002027
 python main.py query-knowledge 什么是安全边际 --doc-type investment_theory --figure 唐朝 --occasion article --year 2018
 ```
 
-`query-financial-report` 查公司材料，`query-knowledge` 查投资通识，筛选参数不共用。两边都支持 `--mode`、`--top-k`、`--output`；`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。
+三套命令分别查定期报告、投资者材料和投资通识，筛选参数不共用。都支持 `--mode`、`--top-k`、`--output`；`--mode` 不写时使用 `config.yaml` 的 `retrieval.mode`。
 
-`query-financial-report` 可选 `--doc-type`（`filing`、`ir_qa`、`survey`、`research`、`news`）、`--stock-name`、`--code`、`--period`、`--section`、`--entity`。传入公司或代码后，向量和 BM25 都只保留这家公司。报告期用 `--period`，不要用 `--year`。
+`query-financial-report` 可选 `--doc-type`（`filing`）、`--stock-name`、`--code`、`--period`、`--section`、`--entity`。传入公司或代码后，向量和 BM25 都只保留这家公司。报告期用 `--period`，不要用 `--year`。
+
+`query-investor-materials` 可选 `--doc-type`（`ir_qa`、`ir_activities`、`research`、`news`）、`--stock-name`、`--code`、`--year`。
 
 `query-knowledge` 可选 `--doc-type`（`investment_theory`、`beginner`）、`--figure`、`--occasion`、`--year`。`--figure` 和 `--occasion` 只用于 `investment_theory`。
 
@@ -153,15 +168,17 @@ python main.py serve --host 127.0.0.1 --port 8100
 
 `embedding.keep_in_memory` 控制向量模型是否常驻。设为 `true` 时，服务启动就加载模型，后续请求直接编码；设为 `false` 时，每次向量检索临时加载，请求结束后释放。启动参数可以覆盖配置：`python api.py --keep-model` 或 `python main.py serve --no-keep-model`。`GET /health` 会返回 `keep_in_memory` 和 `model_loaded`。
 
-默认只监听本机的 `8100` 端口。knowledge 和 financial_report 是两套接口，路径已经分开，请求体里不再传 `collection`。把另一套的筛选字段写进来会返回 422。
+默认只监听本机的 `8100` 端口。knowledge、financial_report、investor_materials 是三套接口，路径已经分开，请求体里不再传 `collection`。把另一套的筛选字段写进来会返回 422。
 
 `POST /knowledge/retrieve` 和 `POST /knowledge/query` 只查投资通识。可选筛选是 `doc_type`、`figure`、`occasion` 和 `year`。目前 `doc_type` 只有 `investment_theory`。`figure` 是 `唐朝`、`buffett`、`munger`；`occasion` 是 `letter`、`meeting`、`speech`、`article`。不传表示该层不限制。
 
 `POST /financial_report/retrieve` 和 `POST /financial_report/query` 只查定期报告。可选筛选是 `stock_name`、`stock_code`、`period`、`section` 和 `entity`。`section` 是 `profile`、`mda`、`material`、`governance`、`financials`、`notes`、`other`；`entity` 是 `consolidated` 或 `parent`，只用于财务报表和附注。`period` 写成 `2024`、`2024Q1` 或 `2024H1`，格式不对返回 400。
 
+`POST /investor_materials/retrieve` 和 `POST /investor_materials/query` 只查投资者材料。可选筛选是 `doc_type`、`stock_name`、`stock_code` 和 `year`。`doc_type` 是 `ir_qa`、`ir_activities`、`research`、`news`。
+
 `question` 必填且不能为空白。`mode` 只能是 `hybrid`、`bm25` 或 `vector`，`top_k` 必须是大于 0 的整数。不传时分别使用 `retrieval.mode` 和 `retrieval.top_k`。字段说明见 `http://127.0.0.1:8100/docs`。`GET /health` 返回服务是否在运行，以及索引文件是否存在。
 
-`/knowledge/retrieve` 和 `/financial_report/retrieve` 只返回命中，不调用大模型。对应的 `/query` 用 `output` 选择返回内容：`hits` 只返回命中，`answer` 只返回回答，`both` 两者都返回。不传 `output` 时看 `llm.enabled`：`true` 相当于 `both`，`false` 相当于 `hits`。
+各语料的 `/retrieve` 只返回命中，不调用大模型。对应的 `/query` 用 `output` 选择返回内容：`hits` 只返回命中，`answer` 只返回回答，`both` 两者都返回。不传 `output` 时看 `llm.enabled`：`true` 相当于 `both`，`false` 相当于 `hits`。
 
 可选 `hit_fields` 由客户端决定每条 hit 返回哪些键：不传则返回该语料全部 hit 字段；传入非空数组则只保留名单中的键（去重、保序）。字段名必须属于对应语料的 hit 模型，否则 422。只裁剪 `hits[]`，顶层 `question` / `collection` / `mode` / `output` / `answer` 不受影响。
 
@@ -170,7 +187,7 @@ $body = @{ question = "2025年毛利率是多少"; stock_code = "600519"; period
 Invoke-RestMethod http://127.0.0.1:8100/financial_report/retrieve -Method Post -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-四个接口都返回 `question`、`collection` 和 `mode`。`collection` 由路径决定，是 `knowledge` 或 `financial_report`。`retrieve` 带 `hits`。`query` 再带实际采用的 `output`：`hits` 和 `both` 带 `hits`，`answer` 和 `both` 带 `answer`。大模型失败时返回 502，并带上已经检索到的 `hits`（同样受 `hit_fields` 约束）。两套命中字段分开维护：knowledge 带 `year`、`figure`、`occasion`；financial_report 带 `stock_name`、`stock_code`、`period`、`published_on`、`section`、`entity`。共用字段是 `scope`、`doc_type`、`title` 以及检索本身的 `rank`、`id`、`source_*`、`chunk_*`、`score`。投资理论的展示名来自 `figure`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
+接口都返回 `question`、`collection` 和 `mode`。`collection` 由路径决定，是 `knowledge`、`financial_report` 或 `investor_materials`。`retrieve` 带 `hits`。`query` 再带实际采用的 `output`：`hits` 和 `both` 带 `hits`，`answer` 和 `both` 带 `answer`。大模型失败时返回 502，并带上已经检索到的 `hits`（同样受 `hit_fields` 约束）。三套命中字段分开维护：knowledge 带 `year`、`figure`、`occasion`；financial_report 带 `stock_name`、`stock_code`、`period`、`published_on`、`section`、`entity`；investor_materials 带 `stock_name`、`stock_code`、`year`。共用字段是 `scope`、`doc_type`、`title` 以及检索本身的 `rank`、`id`、`source_*`、`chunk_*`、`score`。投资理论的展示名来自 `figure`。要让其他机器访问，把 `--host` 改成 `0.0.0.0`。
 
 ## 更换 embedding
 

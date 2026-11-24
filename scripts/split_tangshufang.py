@@ -1,14 +1,19 @@
-"""把 corpus/tangchao 的 Markdown 切成预切分 JSON，再交给 ingest-split 写入索引。
+"""把 corpus/tangchao 的 Markdown 切成预切分 JSON。
 
-切分在本脚本完成；lite_rag 只导入 JSON。
+默认读取 corpus/tangchao/*.md，
+写出到 corpus/03_splited/tangshufang/{同名}.json。
+
+切分标记 tangshufang-md-v1（chunk_size=1000, overlap=200）：
+- marko（GFM）转纯文本
+- 表感知滑窗：Markdown 表整表或按行切并重复表头
+- 标题和发布日期从文件名解析
+
 文稿记为投资理论（knowledge/investment_theory），人物唐朝，场合文章。
-标题和发布日期从文件名解析。图片、image_texts.json 和压缩包不处理。
+图片、image_texts.json 和压缩包不处理。
 
 示例：
 
-    python scripts/ingest_tangchao.py --check
-    python scripts/ingest_tangchao.py
-    python scripts/ingest_tangchao.py --force
+    python scripts/split_tangshufang.py
 """
 
 from __future__ import annotations
@@ -25,14 +30,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lite_rag.config import configure_stdio, load_config, resolve_path
-from lite_rag.ingest import ingest_split_documents
+log = logging.getLogger("split_tangshufang")
 
-log = logging.getLogger("tangchao")
-
-SPLIT_NAME = "tangchao-md-v1"
-SOURCE_DIR = ROOT / "corpus" / "tangchao"
-SUPPORTED_SUFFIXES = {".pdf", ".md", ".markdown"}
+SPLIT_NAME = "tangshufang-md-v1"
+DEFAULT_SOURCE = ROOT / "corpus" / "tangchao"
+DEFAULT_OUTPUT = ROOT / "corpus" / "03_splited" / "tangshufang"
 
 # 滑窗参数（lite_rag 不再切分，改这里后需重跑本脚本）
 CHUNK_SIZE = 1000
@@ -253,14 +255,13 @@ def split_document(text: str) -> list[str]:
     return parts
 
 
-def iter_source_files(docs_dir: Path, *, suffixes: set[str] | None = None) -> list[Path]:
-    wanted = {item.lower() for item in (suffixes or SUPPORTED_SUFFIXES)}
+def iter_source_files(docs_dir: Path) -> list[Path]:
     if not docs_dir.exists():
         return []
     files = [
         path
         for path in docs_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in wanted
+        if path.is_file() and path.suffix.lower() in {".md", ".markdown"}
     ]
     return sorted(files, key=lambda path: path.as_posix().lower())
 
@@ -301,22 +302,21 @@ def _render_markdown(node) -> str:
     return inner
 
 
-def pdf_to_text(path: Path) -> str:
-    from pypdf import PdfReader
-
-    reader = PdfReader(str(path))
-    pages = [(page.extract_text() or "").strip() for page in reader.pages]
-    return "\n\n".join(page for page in pages if page).strip()
-
-
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="把 corpus/tangchao 的 Markdown 写入向量库")
-    parser.add_argument("--check", action="store_true", help="只生成并校验 JSON，不加载模型，也不写向量")
-    parser.add_argument("--force", action="store_true", help="即使文本和元信息没变，也重新嵌入并写入")
-    args = parser.parse_args()
-    if args.check and args.force:
-        parser.error("--check 和 --force 不能同时使用")
-    return args
+    parser = argparse.ArgumentParser(description="把 corpus/tangchao 的 Markdown 切成预切分 JSON")
+    parser.add_argument(
+        "--source",
+        type=Path,
+        default=DEFAULT_SOURCE,
+        help="Markdown 根目录，默认 corpus/tangchao",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="JSON 输出根目录，默认 corpus/03_splited/tangshufang",
+    )
+    return parser.parse_args()
 
 
 def parse_article(stem: str) -> tuple[str, str, int]:
@@ -357,16 +357,12 @@ def article_meta(stem: str) -> dict:
     return meta
 
 
-def split_root(cfg: dict) -> Path:
-    return resolve_path(cfg, cfg["paths"]["split_dir"]) / "tangchao"
-
-
-def json_path(out_dir: Path, source: Path) -> Path:
-    relative = source.resolve().relative_to(SOURCE_DIR.resolve())
+def json_path(out_dir: Path, source: Path, source_dir: Path) -> Path:
+    relative = source.resolve().relative_to(source_dir.resolve())
     return out_dir / relative.with_suffix(".json")
 
 
-def write_article(cfg: dict, out_dir: Path, source: Path) -> tuple[dict, int]:
+def write_article(out_dir: Path, source: Path, source_dir: Path) -> tuple[dict, int]:
     raw = source.read_text(encoding="utf-8-sig")
     text = md_to_text(raw)
     chunks = split_document(text) if text else []
@@ -379,7 +375,7 @@ def write_article(cfg: dict, out_dir: Path, source: Path) -> tuple[dict, int]:
         "meta": meta,
         "chunks": [{"text": chunk} for chunk in chunks],
     }
-    destination = json_path(out_dir, source)
+    destination = json_path(out_dir, source, source_dir)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -401,25 +397,20 @@ def remove_stale(out_dir: Path, live: set[Path]) -> int:
     return removed
 
 
-def export_json(cfg: dict) -> tuple[int, int]:
-    if not SOURCE_DIR.is_dir():
-        raise SystemExit(f"文稿目录不存在: {SOURCE_DIR}")
-    files = [
-        path
-        for path in iter_source_files(SOURCE_DIR)
-        if path.suffix.lower() in {".md", ".markdown"}
-    ]
+def export_json(source_dir: Path, out_dir: Path) -> tuple[int, int]:
+    if not source_dir.is_dir():
+        raise SystemExit(f"文稿目录不存在: {source_dir}")
+    files = iter_source_files(source_dir)
     if not files:
-        raise SystemExit(f"{SOURCE_DIR} 里没有 Markdown。")
-    out_dir = split_root(cfg)
+        raise SystemExit(f"{source_dir} 里没有 Markdown。")
     live: set[Path] = set()
     written = 0
     chunk_count = 0
     for source in files:
-        meta, count = write_article(cfg, out_dir, source)
+        meta, count = write_article(out_dir, source, source_dir)
         if not count:
             continue
-        destination = json_path(out_dir, source)
+        destination = json_path(out_dir, source, source_dir)
         live.add(destination.resolve())
         written += 1
         chunk_count += count
@@ -431,11 +422,9 @@ def export_json(cfg: dict) -> tuple[int, int]:
 
 
 def main() -> None:
-    configure_stdio()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = parse_args()
-    cfg = load_config()
-    export_json(cfg)
-    ingest_split_documents(cfg, force=args.force, check=args.check)
+    export_json(args.source, args.output)
 
 
 if __name__ == "__main__":
